@@ -1,0 +1,67 @@
+"""Start SimConfigKeeper.  Usage:  SimConfigKeeper.pyw [--minimized] [--data DIR] [--no-elevate]"""
+import argparse
+import sys
+from pathlib import Path
+
+from PySide6.QtCore import QLockFile
+from PySide6.QtWidgets import QApplication, QMessageBox
+
+from simconfigkeeper import core
+from simconfigkeeper.core import APP_NAME, Repo, Rule, default_data_dir
+from simconfigkeeper.gui import MainWindow, make_icon
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--minimized", action="store_true", help="start hidden in the tray (used at boot)")
+    ap.add_argument("--data", default=None, help="data folder (default C:\\ProgramData\\SimConfigKeeper)")
+    ap.add_argument("--no-elevate", action="store_true", help="do not ask for administrator rights")
+    args, _ = ap.parse_known_args()
+
+    # Files under Program Files / ProgramData can only be restored with admin rights, so ask for them.
+    # (The built .exe already carries an 'requireAdministrator' manifest; this covers running from source.)
+    if sys.platform == "win32" and not core.is_admin() and not args.no_elevate:
+        if core.relaunch_as_admin(sys.argv[1:]):
+            return 0
+        # user clicked "No" on the UAC prompt: carry on without admin rights
+
+    app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setWindowIcon(make_icon())
+    app.setQuitOnLastWindowClosed(False)
+
+    data_dir = args.data or str(default_data_dir())
+    Path(data_dir).mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(Path(data_dir) / "instance.lock"))
+    if not lock.tryLock(100):
+        if not args.minimized:
+            QMessageBox.information(None, APP_NAME, f"{APP_NAME} is already running — look for its icon in "
+                                    "the system tray (bottom-right, maybe under the ^ arrow).")
+        return 0
+
+    repo = Repo(data_dir)
+    if repo.get("first_run_done") != "1":
+        repo.save_rule(Rule(0, "Any change", None, "any_change"))
+        repo.set("first_run_done", "1")
+
+    # v1.0 used the registry Run key, which cannot start an elevated program: move to the scheduled task.
+    if sys.platform == "win32" and core.is_admin() and repo.get("autostart_migrated") != "1":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, core.RUN_KEY) as k:
+                winreg.QueryValueEx(k, APP_NAME)
+            core.set_autostart(True)
+        except OSError:
+            pass
+        repo.set("autostart_migrated", "1")
+
+    start_hidden = args.minimized and repo.get("start_minimized") == "1"
+    win = MainWindow(repo, start_hidden=start_hidden)
+    if sys.platform == "win32" and not core.is_admin():
+        win.statusBar().showMessage("Not running as administrator — restoring files in Program Files / "
+                                    "ProgramData may fail.")
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
