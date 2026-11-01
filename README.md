@@ -8,7 +8,8 @@ recorded, you can see exactly what changed, and you can put everything back with
 Get **SimConfigKeeper.exe** from the [latest release](../../releases/latest) — no Python needed.
 Every push to `main` is also built automatically: *Actions* tab → latest run → *Artifacts*.
 
-To publish a new release, push a version tag: `git tag v1.4.0 && git push origin v1.4.0`.
+To publish a new release, raise `APP_VERSION` in `simconfigkeeper/core.py` and push to `main` — the build
+publishes `v<version>` automatically (existing releases are never overwritten).
 
 ## Install (on each sim PC)
 
