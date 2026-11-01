@@ -232,4 +232,20 @@ diff = core.unified_diff(repo.get_object(repo.entries(repo.latest_version().snap
 dd = gui.DiffDialog("Prepar3D.cfg: v3 → now", diff, w)
 dd.resize(900, 420)
 shot(dd, "diff.png")
+
+# 8. Claude tab + a proposal waiting for approval
+cfgf = fid["Prepar3D.cfg"]
+cur = path["Prepar3D.cfg"].read_bytes()
+core.create_proposal(repo, cfgf, cur.replace(b"TEXTURE_MAX_LOAD=2048", b"TEXTURE_MAX_LOAD=4096")
+                     .replace(b"LOD_RADIUS=4.500000", b"LOD_RADIUS=5.500000"),
+                     "TEXTURE_MAX_LOAD was lowered to 2048 today, which explains the blurry ground textures the "
+                     "instructor reported. Sim 2 runs 4096 on the same RTX 4080 without stutters, so restoring 4096 "
+                     "matches the certified v3 value. LOD_RADIUS 5.5 is a middle ground between v1 (6.5) and v2 (4.5).")
+w.tabs.setCurrentWidget(w.tab_claude)
+w.check_proposals()
+w.refresh_all()
+shot(w, "claude.png")
+pd = gui.ProposalDialog(repo, core.list_proposals(repo, "pending")[0], w)
+pd.resize(980, 600)
+shot(pd, "claude-proposal.png")
 print("done →", OUT)

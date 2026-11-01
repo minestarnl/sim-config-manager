@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 import subprocess
 import sys
@@ -425,6 +426,96 @@ class CreateVersionDialog(QDialog):
         return self.title.text().strip(), self.notes.toPlainText().strip(), self.by.text().strip()
 
 
+class ProposalDialog(QDialog):
+    """Review a change Claude proposed: reason, diff, Apply / Reject."""
+
+    def __init__(self, repo: Repo, prop: dict, parent=None):
+        super().__init__(parent)
+        self.repo, self.prop = repo, prop
+        self.setWindowTitle(f"Claude's proposed change — {prop['label']}")
+        self.resize(980, 640)
+        lay = QVBoxLayout(self)
+        f = repo.file(prop["file_id"])
+        cur = core.read_file_bytes(f.path) if f else None
+        new = core.proposal_data(prop)
+        head = QLabel(f"<b>{html.escape(prop['label'])}</b> — {html.escape(prop['path'])}<br>"
+                      f"Proposed {fmt_ts(prop['created'])} · status: <b>{prop['status']}</b>")
+        head.setTextFormat(Qt.RichText)
+        lay.addWidget(head)
+        reason = QLabel("<b>Claude's reason:</b><br>" + html.escape(prop["reason"]).replace("\n", "<br>"))
+        reason.setWordWrap(True)
+        reason.setTextFormat(Qt.RichText)
+        reason.setStyleSheet("background:#eef4fb; padding:8px; border-radius:4px")
+        lay.addWidget(reason)
+        warns = []
+        if f is None:
+            warns.append("This file is no longer tracked.")
+        elif (core.sha256_bytes(cur) if cur is not None else None) != prop.get("base_hash"):
+            warns.append("⚠ The file changed after Claude read it. The diff below compares the file as it is NOW "
+                         "with Claude's version — applying would also undo those newer changes.")
+        running = core.running_processes(repo.get("warn_processes").split(";"))
+        if running:
+            warns.append("⚠ Running now: " + ", ".join(running) + ". Prepar3D rewrites Prepar3D.cfg when it exits; "
+                         "apply with the sim closed.")
+        for wtxt in warns:
+            lab = QLabel(wtxt)
+            lab.setWordWrap(True)
+            lab.setStyleSheet("background:#fff3cd; color:#664d03; padding:6px")
+            lay.addWidget(lab)
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setFont(QFont("Consolas", 10))
+        out = []
+        for ln in core.unified_diff(cur, new, "now", "proposed").splitlines():
+            e = html.escape(ln) or "&nbsp;"
+            if ln.startswith(("+++", "---")):
+                out.append(f"<b style='color:#555'>{e}</b>")
+            elif ln.startswith("@@"):
+                out.append(f"<span style='color:#6a1b9a'>{e}</span>")
+            elif ln.startswith("+"):
+                out.append(f"<span style='background:#e6ffed;color:#1b5e20'>{e}</span>")
+            elif ln.startswith("-"):
+                out.append(f"<span style='background:#ffeef0;color:#b71c1c'>{e}</span>")
+            else:
+                out.append(e)
+        view.setHtml("<pre>" + "<br>".join(out) + "</pre>")
+        lay.addWidget(view, 1)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Approved by:"))
+        self.by = QLineEdit(repo.get("version_author") or os.environ.get("USERNAME", ""))
+        row.addWidget(self.by)
+        row.addStretch()
+        if prop["status"] == "pending" and f is not None:
+            b = QPushButton("✔ Apply change")
+            b.setStyleSheet("QPushButton { background:#2e7d32; color:white; font-weight:bold; padding:6px 14px; }")
+            b.clicked.connect(self.apply)
+            row.addWidget(b)
+            b = QPushButton("✖ Reject")
+            b.clicked.connect(self.reject_prop)
+            row.addWidget(b)
+        b = QPushButton("Close")
+        b.clicked.connect(self.reject)
+        row.addWidget(b)
+        lay.addLayout(row)
+
+    def apply(self):
+        try:
+            core.apply_proposal(self.repo, self.prop, self.by.text().strip())
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, APP_NAME, f"Could not apply: {e}")
+            return
+        QMessageBox.information(self, APP_NAME, "Applied and recorded in History. Tell Claude it's done — it can "
+                                "read the file again to check.")
+        self.accept()
+
+    def reject_prop(self):
+        note, ok = QInputDialog.getText(self, APP_NAME, "Why not? (optional — Claude can see this)")
+        if not ok:
+            return
+        core.reject_proposal(self.repo, self.prop, note)
+        self.accept()
+
+
 # --------------------------------------------------------------------------- main window
 
 class MainWindow(QMainWindow):
@@ -445,6 +536,7 @@ class MainWindow(QMainWindow):
         self.tab_history = self.build_history_tab()
         self.tab_alerts = self.build_alerts_tab()
         self.tab_sync = self.build_sync_tab()
+        self.tab_claude = self.build_claude_tab()
         self.tab_settings = self.build_settings_tab()
         self.tabs.addTab(self.tab_versions, "Versions")
         self.tabs.addTab(self.tab_quick, "Quick restore")
@@ -452,6 +544,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.tab_history, "History")
         self.tabs.addTab(self.tab_alerts, "Alerts")
         self.tabs.addTab(self.tab_sync, "Cloud / other sims")
+        self.tabs.addTab(self.tab_claude, "Claude")
         self.tabs.addTab(self.tab_settings, "Settings")
         self.tabs.currentChanged.connect(lambda _i: self.refresh_all())
         self.statusBar().showMessage("Ready")
@@ -544,6 +637,7 @@ class MainWindow(QMainWindow):
         self.timer.start(secs * 1000)
 
     def tick(self):
+        self.check_proposals()
         if self.paused:
             return
         try:
@@ -584,7 +678,8 @@ class MainWindow(QMainWindow):
         self.rebuild_tray_rp_menu()
         fn = {self.tab_versions: self.refresh_versions, self.tab_quick: self.refresh_quick,
               self.tab_files: self.refresh_files, self.tab_history: self.refresh_history,
-              self.tab_alerts: self.refresh_alerts, self.tab_sync: self.refresh_sync}.get(cur)
+              self.tab_alerts: self.refresh_alerts, self.tab_sync: self.refresh_sync,
+              self.tab_claude: self.refresh_claude}.get(cur)
         if fn:
             fn()
         self.update_version_indicator()
@@ -1136,6 +1231,7 @@ class MainWindow(QMainWindow):
     def files_context(self, pos):
         m = QMenu(self)
         m.addAction("Open in editor", self.edit_contents)
+        m.addAction("Copy for Claude (paste into any chat)", self.copy_for_claude)
         m.addAction("Show changes since last snapshot", self.diff_file_with_last)
         m.addAction("Rename / change group…", self.edit_file)
         m.addAction("Open file location", self.open_location)
@@ -1847,6 +1943,181 @@ class MainWindow(QMainWindow):
             except Exception as e:  # noqa: BLE001
                 QMessageBox.warning(self, APP_NAME, f"Import failed: {e}")
             self.refresh_all()
+
+
+    # ================================================================= Claude tab
+    def build_claude_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        intro = QLabel(
+            "<h2 style='margin:0'>Let Claude read your configs</h2>"
+            "<p>With the <b>Claude Desktop</b> app on this PC, Claude can read every tracked file, its history and "
+            "versions, and the other sims' files (via the sync folder) — to troubleshoot problems and help dial in "
+            "settings. Claude can also <b>propose</b> changes, but nothing is written until you approve it here; "
+            "every applied change is recorded in History and can be undone.</p>"
+            "<p style='color:#555'>Try asking Claude: <i>“Why do we get stutters on Sim 2 but not Sim 1?”</i> · "
+            "<i>“Compare the ProSim configs of both sims”</i> · <i>“What changed since v3?”</i> · "
+            "<i>“Suggest Prepar3D.cfg settings for an RTX 4080 at 3 projectors.”</i></p>")
+        intro.setWordWrap(True)
+        intro.setTextFormat(Qt.RichText)
+        lay.addWidget(intro)
+
+        box = QGroupBox("Setup")
+        bl = QHBoxLayout(box)
+        self.claude_status = QLabel()
+        self.claude_status.setTextFormat(Qt.RichText)
+        bl.addWidget(self.claude_status, 1)
+        self.claude_connect_btn = QPushButton("Connect to Claude Desktop")
+        self.claude_connect_btn.clicked.connect(self.toggle_claude_connection)
+        bl.addWidget(self.claude_connect_btn)
+        b = QPushButton("Show manual setup")
+        b.clicked.connect(self.show_claude_manual)
+        bl.addWidget(b)
+        lay.addWidget(box)
+
+        self.claude_allow = QCheckBox("Allow Claude to propose changes (you always approve before anything is written)")
+        self.claude_allow.setChecked(self.repo.get("claude_proposals") != "0")
+        self.claude_allow.toggled.connect(lambda v: self.repo.set("claude_proposals", "1" if v else "0"))
+        lay.addWidget(self.claude_allow)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("<b>Changes proposed by Claude</b>"))
+        row.addStretch()
+        for text, fn in (("Review…", self.review_selected_proposal), ("Copy files for Claude…", self.copy_for_claude)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        lay.addLayout(row)
+        self.prop_table = QTableWidget()
+        setup_table(self.prop_table, ["Status", "When", "File", "Reason"], 3)
+        self.prop_table.doubleClicked.connect(lambda _i: self.review_selected_proposal())
+        lay.addWidget(self.prop_table, 1)
+        self._seen_proposals = {p["id"] for p in core.list_proposals(self.repo, "pending")}
+        QTimer.singleShot(1500, lambda: self.check_proposals(startup=True))
+        return w
+
+    def refresh_claude(self):
+        connected = core.claude_desktop_connected()
+        if connected:
+            self.claude_status.setText("<span style='color:#2e7d32'><b>✔ Connected to Claude Desktop.</b></span> "
+                                       "Restart Claude Desktop once after connecting. Look for "
+                                       "<b>sim-config-manager</b> under the tools (🔨) menu in a chat.")
+            self.claude_connect_btn.setText("Disconnect")
+        else:
+            self.claude_status.setText("Not connected. Install Claude Desktop (claude.ai/download) on this PC, then "
+                                       "click <b>Connect</b>.")
+            self.claude_connect_btn.setText("Connect to Claude Desktop")
+        props = list(reversed(core.list_proposals(self.repo)))
+        colors = {"pending": "#e65100", "applied": "#2e7d32", "rejected": "#777"}
+        self.prop_table.setRowCount(len(props))
+        for r, p in enumerate(props):
+            self.prop_table.setItem(r, 0, item(p["status"], p["id"], colors.get(p["status"]),
+                                               bold=p["status"] == "pending"))
+            self.prop_table.setItem(r, 1, item(fmt_ts(p["created"])))
+            self.prop_table.setItem(r, 2, item(p["label"]))
+            self.prop_table.setItem(r, 3, item(p["reason"].replace("\n", " ")[:200]))
+
+    def toggle_claude_connection(self):
+        enable = not core.claude_desktop_connected()
+        try:
+            paths = core.connect_claude_desktop(self.repo.data_dir, enable)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, APP_NAME, f"Could not update Claude Desktop's settings: {e}")
+            return
+        cmd, _args = core.connector_command(self.repo.data_dir)
+        if enable and getattr(sys, "frozen", False) and not os.path.exists(cmd):
+            QMessageBox.warning(self, APP_NAME, f"Put SimConfigManager-MCP.exe next to SimConfigManager.exe:\n{cmd}")
+        QMessageBox.information(
+            self, APP_NAME, ("Connected" if enable else "Disconnected") + ". Updated:\n" + "\n".join(paths) +
+            "\n\nQuit Claude Desktop completely (also from its tray icon) and start it again.")
+        self.refresh_claude()
+
+    def show_claude_manual(self):
+        cmd, args = core.connector_command(self.repo.data_dir)
+        snippet = json.dumps({"mcpServers": {core.MCP_SERVER_KEY: {"command": cmd, "args": args}}}, indent=2)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Manual setup")
+        dlg.resize(720, 360)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("In Claude Desktop: Settings → Developer → Edit Config, and add this to "
+                             "claude_desktop_config.json (merge with what is there), then restart Claude Desktop:"))
+        t = QTextEdit()
+        t.setPlainText(snippet)
+        t.setFont(QFont("Consolas", 10))
+        lay.addWidget(t)
+        b = QPushButton("Copy")
+        b.clicked.connect(lambda: QApplication.clipboard().setText(snippet))
+        lay.addWidget(b)
+        dlg.exec()
+
+    def check_proposals(self, startup: bool = False):
+        try:
+            pend = core.list_proposals(self.repo, "pending")
+        except Exception:  # noqa: BLE001
+            return
+        seen = getattr(self, "_seen_proposals", set())
+        new = [p for p in pend if p["id"] not in seen]
+        self._seen_proposals = seen | {p["id"] for p in pend}
+        if startup and pend:
+            new = pend
+        if new:
+            p = new[-1]
+            self.tray.showMessage(f"Claude proposes a change to {p['label']}",
+                                  p["reason"][:180] + "\n\nOpen Sim Config Manager → Claude to review.",
+                                  QSystemTrayIcon.Information, 15000)
+            if self.tabs.currentWidget() is self.tab_claude and self.isVisible():
+                self.refresh_claude()
+        self.tabs.setTabText(self.tabs.indexOf(self.tab_claude), f"Claude ({len(pend)})" if pend else "Claude")
+
+    def review_selected_proposal(self):
+        ids = selected_data(self.prop_table)
+        pend = core.list_proposals(self.repo)
+        prop = next((p for p in pend if ids and p["id"] == ids[0]), None)
+        if prop is None:
+            prop = next((p for p in reversed(pend) if p["status"] == "pending"), None)
+        if prop is None:
+            QMessageBox.information(self, APP_NAME, "There are no proposals to review.")
+            return
+        ProposalDialog(self.repo, prop, self).exec()
+        self.sync_dirty = True
+        self.check_proposals()
+        self.refresh_all()
+
+    def copy_for_claude(self):
+        files = []
+        if self.tabs.currentWidget() is self.tab_files:
+            files = [self.repo.file(i) for i in selected_data(self.files_table)]
+        if not files:
+            names = [f"{f.display}  [{f.group}]" for f in self.repo.files()]
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Copy files for Claude")
+            dlg.resize(560, 480)
+            lay = QVBoxLayout(dlg)
+            lay.addWidget(QLabel("Tick the files to copy. Paste the result into any Claude chat "
+                                 "(also on your phone or claude.ai)."))
+            lst = QListWidget()
+            for f, n in zip(self.repo.files(), names):
+                it = QListWidgetItem(n)
+                it.setData(Qt.UserRole, f.id)
+                it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                it.setCheckState(Qt.Unchecked)
+                lst.addItem(it)
+            lay.addWidget(lst)
+            bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            bb.accepted.connect(dlg.accept)
+            bb.rejected.connect(dlg.reject)
+            lay.addWidget(bb)
+            if dlg.exec() != QDialog.Accepted:
+                return
+            files = [self.repo.file(lst.item(i).data(Qt.UserRole)) for i in range(lst.count())
+                     if lst.item(i).checkState() == Qt.Checked]
+        files = [f for f in files if f]
+        if not files:
+            return
+        md = core.files_as_markdown(self.repo, files)
+        QApplication.clipboard().setText(md)
+        self.statusBar().showMessage(f"Copied {len(files)} file(s) for Claude ({len(md):,} characters) — paste "
+                                     "into a Claude chat.", 8000)
 
     # ================================================================= settings tab
     def build_settings_tab(self):

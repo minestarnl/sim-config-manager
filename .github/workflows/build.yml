@@ -32,19 +32,35 @@ jobs:
       - name: Build SimConfigManager.exe
         run: python -m PyInstaller --noconfirm --onefile --windowed --uac-admin --name SimConfigManager SimConfigManager.pyw
 
+      # Claude connector: console program (stdin/stdout), no admin rights, no Qt
+      - name: Build SimConfigManager-MCP.exe
+        run: python -m PyInstaller --noconfirm --onefile --console --exclude-module PySide6 --name SimConfigManager-MCP SimConfigManager-MCP.py
+
+      - name: Smoke-test the connector exe
+        shell: pwsh
+        run: |
+          $init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
+          $list = '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+          $out = "$init`n$list`n" | dist\SimConfigManager-MCP.exe --data "$env:RUNNER_TEMP\nodata"
+          $out
+          if (-not ($out -match '"read_file"')) { throw "connector did not answer tools/list" }
+
       - name: Checksum
         shell: pwsh
         run: |
-          $h = (Get-FileHash dist\SimConfigManager.exe -Algorithm SHA256).Hash.ToLower()
-          "$h *SimConfigManager.exe" | Out-File -Encoding ascii dist\SimConfigManager.exe.sha256
-          Get-Content dist\SimConfigManager.exe.sha256
+          $lines = foreach ($n in "SimConfigManager.exe", "SimConfigManager-MCP.exe") {
+            "$((Get-FileHash "dist\$n" -Algorithm SHA256).Hash.ToLower()) *$n"
+          }
+          $lines | Out-File -Encoding ascii dist\SHA256SUMS.txt
+          Get-Content dist\SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
         with:
           name: SimConfigManager-windows
           path: |
             dist/SimConfigManager.exe
-            dist/SimConfigManager.exe.sha256
+            dist/SimConfigManager-MCP.exe
+            dist/SHA256SUMS.txt
 
       - name: Read app version
         id: ver
@@ -71,5 +87,6 @@ jobs:
           name: SimConfigManager ${{ steps.ver.outputs.version }}
           files: |
             dist/SimConfigManager.exe
-            dist/SimConfigManager.exe.sha256
+            dist/SimConfigManager-MCP.exe
+            dist/SHA256SUMS.txt
           generate_release_notes: true

@@ -53,6 +53,10 @@ def main():
             pass
         repo.set("autostart_migrated_v14", "1")
 
+    if sys.platform == "win32" and core.is_admin() and repo.get("proposals_acl_v15") != "1":
+        core.allow_users_to_propose(repo.data_dir)
+        repo.set("proposals_acl_v15", "1")
+
     start_hidden = args.minimized and repo.get("start_minimized") == "1"
     win = MainWindow(repo, start_hidden=start_hidden)
     if sys.platform == "win32" and not core.is_admin():

@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 APP_NAME = "SimConfigManager"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 LEGACY_NAMES = ("SimConfigKeeper",)   # earlier name of this app (≤ 1.3)
 
 
@@ -508,15 +508,25 @@ DEFAULT_SETTINGS = {
 
 
 class Repo:
-    def __init__(self, data_dir: Path | str | None = None):
+    def __init__(self, data_dir: Path | str | None = None, read_only: bool = False):
         self.data_dir = Path(data_dir) if data_dir else default_data_dir()
-        self.data_dir.mkdir(parents=True, exist_ok=True)
         self.obj_dir = self.data_dir / "objects"
-        self.obj_dir.mkdir(exist_ok=True)
-        self.db = sqlite3.connect(str(self.data_dir / "repo.db"))
-        self.db.row_factory = sqlite3.Row
-        self.db.executescript(SCHEMA)
-        self.db.commit()
+        self.read_only = read_only
+        if read_only:
+            # used by the Claude connector, which runs without admin rights next to the main app
+            db = self.data_dir / "repo.db"
+            if not db.exists():
+                raise FileNotFoundError(f"No {APP_NAME} data found in {self.data_dir}. Start the app once first.")
+            self.db = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=10)
+            self.db.row_factory = sqlite3.Row
+        else:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            self.obj_dir.mkdir(exist_ok=True)
+            self.db = sqlite3.connect(str(self.data_dir / "repo.db"), timeout=10)
+            self.db.row_factory = sqlite3.Row
+            self.db.executescript(SCHEMA)
+            self.db.commit()
+            (self.data_dir / "proposals").mkdir(exist_ok=True)
         # in-memory stat cache: file_id -> (mtime_ns, size, hash)
         self._stat_cache: dict[int, tuple] = {}
         self._alerted: dict[tuple, Optional[str]] = {}
@@ -1780,3 +1790,192 @@ def set_autostart(enabled: bool) -> bool:
         except OSError:
             pass
     return True
+
+
+# --------------------------------------------------------------------------- change proposals (from Claude)
+#
+# The Claude connector runs without admin rights, so it never writes config files itself. It drops a
+# proposal (JSON) into <data dir>/proposals/; the main app shows it with a diff and only applies it
+# after a person clicks Apply. Applying goes through the normal safety-snapshot + history path.
+
+def proposals_dir(repo: "Repo") -> Path:
+    return repo.data_dir / "proposals"
+
+
+def create_proposal(repo: "Repo", f: TrackedFile, new_data: bytes, reason: str, author: str = "Claude") -> dict:
+    import base64
+    import uuid
+    cur = read_file_bytes(f.path)
+    prop = {
+        "id": time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
+        "created": now_ts(), "author": author, "status": "pending",
+        "file_id": f.id, "label": f.display, "path": f.path, "reason": reason.strip(),
+        "base_hash": sha256_bytes(cur) if cur is not None else None,
+        "new_hash": sha256_bytes(new_data), "new_b64": base64.b64encode(new_data).decode("ascii"),
+    }
+    d = proposals_dir(repo)
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = d / f"{prop['id']}.tmp"
+    tmp.write_text(json.dumps(prop, indent=1), encoding="utf-8")
+    os.replace(tmp, d / f"{prop['id']}.json")
+    return prop
+
+
+def list_proposals(repo: "Repo", status: Optional[str] = None) -> list[dict]:
+    d = proposals_dir(repo)
+    out = []
+    if d.is_dir():
+        for p in sorted(d.glob("*.json")):
+            try:
+                prop = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if status is None or prop.get("status") == status:
+                out.append(prop)
+    return out
+
+
+def proposal_data(prop: dict) -> bytes:
+    import base64
+    return base64.b64decode(prop["new_b64"])
+
+
+def _save_proposal(repo: "Repo", prop: dict) -> None:
+    p = proposals_dir(repo) / f"{prop['id']}.json"
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(prop, indent=1), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def reject_proposal(repo: "Repo", prop: dict, note: str = "") -> None:
+    prop.update(status="rejected", decided=now_ts(), note=note)
+    _save_proposal(repo, prop)
+    repo.log(f"Rejected Claude's proposed change to {prop['label']}" + (f": {note}" if note else ""),
+             file_id=prop.get("file_id"))
+
+
+def apply_proposal(repo: "Repo", prop: dict, approved_by: str = "") -> None:
+    """Write the proposed content (safety snapshot first, recorded in History)."""
+    f = repo.file(prop["file_id"])
+    if f is None:
+        raise ValueError("That file is no longer tracked.")
+    data = proposal_data(prop)
+    if sha256_bytes(data) != prop["new_hash"]:
+        raise ValueError("Proposal is damaged (checksum mismatch).")
+    cur = read_file_bytes(f.path)
+    if cur is not None:
+        repo.put_object(cur)
+    repo.commit(f"Before applying Claude's change to {f.display}", kind="safety", file_ids=[f.id])
+    write_file_atomic(f.path, data)
+    repo._stat_cache.pop(f.id, None)
+    who = f" (approved by {approved_by})" if approved_by else ""
+    repo.commit(f"Edited {f.display}: Claude — {prop['reason'][:150]}{who}", kind="manual", file_ids=[f.id])
+    repo.log(f"Applied Claude's change to {f.display}{who}: {prop['reason'][:200]}", file_id=f.id)
+    prop.update(status="applied", decided=now_ts(), approved_by=approved_by)
+    _save_proposal(repo, prop)
+
+
+# --------------------------------------------------------------------------- Claude Desktop hookup
+
+MCP_SERVER_KEY = "sim-config-manager"
+
+
+def connector_command(data_dir: Path) -> tuple[str, list[str]]:
+    """Command Claude Desktop should run to start the connector."""
+    if getattr(sys, "frozen", False):
+        exe = Path(sys.executable).with_name("SimConfigManager-MCP.exe")
+        return str(exe), ["--data", str(data_dir)]
+    script = Path(__file__).resolve().parents[1] / "SimConfigManager-MCP.py"
+    return sys.executable.replace("pythonw.exe", "python.exe"), [str(script), "--data", str(data_dir)]
+
+
+def claude_desktop_config_paths() -> list[Path]:
+    """Claude Desktop's config file(s): the normal install and the Microsoft Store (MSIX) install."""
+    paths = []
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        paths.append(Path(appdata) / "Claude" / "claude_desktop_config.json")
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        for pkg in glob.glob(os.path.join(local, "Packages", "Claude_*")):
+            paths.append(Path(pkg) / "LocalCache" / "Roaming" / "Claude" / "claude_desktop_config.json")
+    if sys.platform == "darwin":
+        paths.append(Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json")
+    return paths
+
+
+def claude_desktop_connected() -> bool:
+    for p in claude_desktop_config_paths():
+        try:
+            if MCP_SERVER_KEY in json.loads(p.read_text(encoding="utf-8")).get("mcpServers", {}):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+def connect_claude_desktop(data_dir: Path, enable: bool = True) -> list[str]:
+    """Add (or remove) the connector in Claude Desktop's config. Keeps every other setting; makes a backup."""
+    command, args = connector_command(data_dir)
+    targets = [p for p in claude_desktop_config_paths() if p.parent.is_dir()] or claude_desktop_config_paths()[:1]
+    written = []
+    for p in targets:
+        cfg = {}
+        if p.exists():
+            raw = p.read_text(encoding="utf-8")
+            try:
+                cfg = json.loads(raw) if raw.strip() else {}
+            except ValueError:
+                raise ValueError(f"{p} is not valid JSON — fix or delete it first.")
+            shutil.copyfile(p, p.with_name(p.name + ".bak"))
+        servers = cfg.setdefault("mcpServers", {})
+        if enable:
+            servers[MCP_SERVER_KEY] = {"command": command, "args": args}
+        else:
+            servers.pop(MCP_SERVER_KEY, None)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        os.replace(tmp, p)
+        written.append(str(p))
+    return written
+
+
+def files_as_markdown(repo: "Repo", files: list[TrackedFile], max_bytes: int = 200_000) -> str:
+    """Selected files as one Markdown block — to paste into any Claude chat."""
+    ver, status = repo.version_status()
+    st = {x.file.id: x.status for x in status}
+    out = [f"Config files from simulator PC **{repo.machine}** ({APP_NAME}, {fmt_ts(now_ts())})."]
+    if ver:
+        out.append(f"Current configuration version: {ver.label}.")
+    used = 0
+    for f in files:
+        data = repo.read_current(f)
+        out.append(f"\n### {f.display}  ({f.group})\n`{f.path}` — status vs version: "
+                   f"{STATUS_TEXT.get(st.get(f.id, 'new'), '?')}")
+        if data is None:
+            out.append("_missing on disk_")
+            continue
+        if is_binary(data):
+            out.append(f"_binary file, {len(data)} bytes_")
+            continue
+        text = detect_text(data)[0]
+        if used + len(text) > max_bytes:
+            out.append("_left out: size limit reached_")
+            continue
+        used += len(text)
+        lang = "xml" if f.path.lower().endswith(".xml") else ("json" if f.path.lower().endswith(".json") else "ini")
+        out.append(f"```{lang}\n{text.rstrip()}\n```")
+    return "\n".join(out)
+
+
+def allow_users_to_propose(data_dir: Path) -> None:
+    """The connector runs as a normal user: make sure it may drop proposals into the proposals folder."""
+    if sys.platform != "win32":
+        return
+    import subprocess
+    d = Path(data_dir) / "proposals"
+    d.mkdir(parents=True, exist_ok=True)
+    # S-1-5-32-545 = the local "Users" group (works in every Windows language)
+    subprocess.run(["icacls", str(d), "/grant", "*S-1-5-32-545:(OI)(CI)M", "/Q"], capture_output=True,
+                   **_no_window())

@@ -12,11 +12,12 @@ recorded, you can see exactly what changed, and you can put everything back with
 | **Quick restore** — one button per saved setup ![](docs/screenshots/quick-restore.png) | **Files** — every tracked file with its full history ![](docs/screenshots/files.png) |
 | **Editor** — syntax highlighting, find & replace ![](docs/screenshots/editor-cfg.png) | **Live syntax check** — broken XML marked before you save ![](docs/screenshots/editor-xml-check.png) |
 | **Alerts** — notifications and auto-undo for specific changes ![](docs/screenshots/alerts.png) | **Create version** — release notes pre-filled with what changed ![](docs/screenshots/create-version.png) |
-| **Differences** — exactly what changed, line by line ![](docs/screenshots/diff.png) | |
+| **Differences** — exactly what changed, line by line ![](docs/screenshots/diff.png) | **Claude** — reads your configs, proposes changes you approve ![](docs/screenshots/claude-proposal.png) |
 
 ## Download
 
-Get **SimConfigManager.exe** from the [latest release](../../releases/latest) — no Python needed.
+Get **SimConfigManager.exe** (and **SimConfigManager-MCP.exe** for the Claude connector) from the
+[latest release](../../releases/latest) — no Python needed. Keep both exes in the same folder.
 Every push to `main` is also built automatically: *Actions* tab → latest run → *Artifacts*.
 
 To publish a new release, raise `APP_VERSION` in `simconfigmanager/core.py` and push to `main` — the build
@@ -65,6 +66,7 @@ publishes `v<version>` automatically (existing releases are never overwritten).
 | Export changelog as Markdown (paste into Notion) or CSV (Notion database / Google Sheets) | History |
 | **Certification archive**: all monitored files in one zip + REPORT.txt + checksums | Files → Export archive, tray |
 | **Import archive** on this or another PC (paths translated, checksums verified) | Files → Import archive |
+| **Claude connector**: Claude reads configs, history, versions and other sims; proposes changes you approve | Claude |
 | Runs in the tray, starts with Windows, single instance | Settings |
 
 ### Alert rule types
@@ -100,6 +102,33 @@ configuration version and whether the files match it. Versions are included in c
 
 Restore points vs versions: **restore points** are named presets you switch between (e.g. "Checkride");
 **versions** are the numbered, official history of the configuration.
+
+## Claude: troubleshoot and dial in settings
+
+With the **Claude Desktop** app (claude.ai/download) on a sim PC, Claude can work directly with your
+configs. Put `SimConfigManager-MCP.exe` next to `SimConfigManager.exe`, open the **Claude** tab, click
+**Connect to Claude Desktop**, and restart Claude Desktop. Then just ask, e.g.:
+
+* *"Why do we get stutters on Sim 2 but not on Sim 1?"*
+* *"Compare the ProSim configs of both sims."*
+* *"What changed since v3, and could that explain the blurry textures?"*
+* *"Suggest Prepar3D.cfg settings for an RTX 4080 driving three projectors."*
+
+What Claude can do through the connector:
+
+| Read (always) | Change (only with your approval) |
+|---|---|
+| Overview: version status, alerts, other sims | **Propose** an edit with a reason |
+| Read any tracked file — now, in any version/snapshot/restore point, or on another sim | You see the reason and the exact diff in the app (tray notification) |
+| Search all files (e.g. every `TEXTURE` setting), with the cfg `[section]` | **Apply** → safety snapshot, written with the original encoding, recorded in History; or **Reject** with a note Claude can see |
+| Diffs between versions, file history, release notes, recent events | Proposals that would break XML are refused up front |
+
+The connector never writes config files itself and runs without admin rights. Turn proposals off in the
+Claude tab if you want read-only. **Copy files for Claude** (Claude tab, or right-click files) copies selected
+files as text you can paste into any Claude chat — handy on your phone or claude.ai.
+
+The connector is a standard MCP server (stdio), so other MCP clients work too:
+`SimConfigManager-MCP.exe [--data <data folder>]`.
 
 ## Editor
 
@@ -146,7 +175,7 @@ python SimConfigManager.pyw --no-elevate --data .\testdata  # run with a throw-a
 ```
 
 `simconfigmanager/core.py` — storage, snapshots, versions, rules, sync, archives ·
-`gui.py` — main window · `editor.py` — built-in editor.
+`gui.py` — main window · `editor.py` — built-in editor · `mcp_server.py` — Claude connector.
 Regenerate the README screenshots with `QT_QPA_PLATFORM=offscreen python tools/make_screenshots.py`.
 
 ## Upgrading from SimConfigKeeper (≤ 1.3)
