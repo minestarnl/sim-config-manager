@@ -1,4 +1,4 @@
-"""SimConfigKeeper desktop UI (PySide6)."""
+"""SimConfigManager desktop UI (PySide6)."""
 from __future__ import annotations
 
 import html
@@ -1497,7 +1497,7 @@ class MainWindow(QMainWindow):
         self.refresh_all()
 
     def import_archive(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open SimConfigKeeper archive",
+        path, _ = QFileDialog.getOpenFileName(self, "Open SimConfigManager archive",
                                               self.repo.get("last_archive_dir"), "Archive (*.zip)")
         if not path:
             return
@@ -1643,7 +1643,7 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Sync folder (Google Drive, or a shared folder on your local server)")
         bl = QVBoxLayout(box)
         bl.addWidget(QLabel(
-            "Pick a folder that Google Drive for Desktop syncs (e.g. <i>G:\\My Drive\\SimConfigKeeper</i>) "
+            "Pick a folder that Google Drive for Desktop syncs (e.g. <i>G:\\My Drive\\SimConfigManager</i>) "
             "or a network share on another PC (e.g. <i>\\\\SERVER\\SimConfig</i>). Use the SAME folder on every "
             "sim. Each PC only writes its own file, so the sims never conflict, and every config version is "
             "backed up off-site."))

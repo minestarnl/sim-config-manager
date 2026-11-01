@@ -1,4 +1,4 @@
-"""Start SimConfigKeeper.  Usage:  SimConfigKeeper.pyw [--minimized] [--data DIR] [--no-elevate]"""
+"""Start SimConfigManager.  Usage:  SimConfigManager.pyw [--minimized] [--data DIR] [--no-elevate]"""
 import argparse
 import sys
 from pathlib import Path
@@ -6,15 +6,15 @@ from pathlib import Path
 from PySide6.QtCore import QLockFile
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from simconfigkeeper import core
-from simconfigkeeper.core import APP_NAME, Repo, Rule, default_data_dir
-from simconfigkeeper.gui import MainWindow, make_icon
+from simconfigmanager import core
+from simconfigmanager.core import APP_NAME, Repo, Rule, default_data_dir
+from simconfigmanager.gui import MainWindow, make_icon
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--minimized", action="store_true", help="start hidden in the tray (used at boot)")
-    ap.add_argument("--data", default=None, help="data folder (default C:\\ProgramData\\SimConfigKeeper)")
+    ap.add_argument("--data", default=None, help="data folder (default C:\\ProgramData\\SimConfigManager)")
     ap.add_argument("--no-elevate", action="store_true", help="do not ask for administrator rights")
     args, _ = ap.parse_known_args()
 
@@ -44,16 +44,14 @@ def main():
         repo.save_rule(Rule(0, "Any change", None, "any_change"))
         repo.set("first_run_done", "1")
 
-    # v1.0 used the registry Run key, which cannot start an elevated program: move to the scheduled task.
-    if sys.platform == "win32" and core.is_admin() and repo.get("autostart_migrated") != "1":
+    # Earlier versions started at logon via the registry Run key (cannot start an elevated program) or
+    # under the old app name: move either to the current scheduled task.
+    if sys.platform == "win32" and core.is_admin() and repo.get("autostart_migrated_v14") != "1":
         try:
-            import winreg
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, core.RUN_KEY) as k:
-                winreg.QueryValueEx(k, APP_NAME)
-            core.set_autostart(True)
+            core.migrate_legacy_autostart()
         except OSError:
             pass
-        repo.set("autostart_migrated", "1")
+        repo.set("autostart_migrated_v14", "1")
 
     start_hidden = args.minimized and repo.get("start_minimized") == "1"
     win = MainWindow(repo, start_hidden=start_hidden)

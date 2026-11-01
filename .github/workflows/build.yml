@@ -29,22 +29,22 @@ jobs:
       - name: Run tests
         run: python -m pytest -q tests
 
-      - name: Build SimConfigKeeper.exe
-        run: python -m PyInstaller --noconfirm --onefile --windowed --uac-admin --name SimConfigKeeper SimConfigKeeper.pyw
+      - name: Build SimConfigManager.exe
+        run: python -m PyInstaller --noconfirm --onefile --windowed --uac-admin --name SimConfigManager SimConfigManager.pyw
 
       - name: Checksum
         shell: pwsh
         run: |
-          $h = (Get-FileHash dist\SimConfigKeeper.exe -Algorithm SHA256).Hash.ToLower()
-          "$h *SimConfigKeeper.exe" | Out-File -Encoding ascii dist\SimConfigKeeper.exe.sha256
-          Get-Content dist\SimConfigKeeper.exe.sha256
+          $h = (Get-FileHash dist\SimConfigManager.exe -Algorithm SHA256).Hash.ToLower()
+          "$h *SimConfigManager.exe" | Out-File -Encoding ascii dist\SimConfigManager.exe.sha256
+          Get-Content dist\SimConfigManager.exe.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SimConfigKeeper-windows
+          name: SimConfigManager-windows
           path: |
-            dist/SimConfigKeeper.exe
-            dist/SimConfigKeeper.exe.sha256
+            dist/SimConfigManager.exe
+            dist/SimConfigManager.exe.sha256
 
       - name: Read app version
         id: ver
@@ -52,13 +52,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $v = python -c "from simconfigkeeper.core import APP_VERSION; print(APP_VERSION)"
+          $v = python -c "from simconfigmanager.core import APP_VERSION; print(APP_VERSION)"
           "version=$v" >> $env:GITHUB_OUTPUT
           gh release view "v$v" --repo "${{ github.repository }}" *> $null
           if ($LASTEXITCODE -eq 0) { "exists=true" >> $env:GITHUB_OUTPUT } else { "exists=false" >> $env:GITHUB_OUTPUT }
           exit 0
 
-      # A release is published automatically the first time a new APP_VERSION (simconfigkeeper/core.py)
+      # A release is published automatically the first time a new APP_VERSION (simconfigmanager/core.py)
       # reaches main, or when a v* tag is pushed. Existing releases are never overwritten.
       - name: Publish release
         if: >-
@@ -68,8 +68,8 @@ jobs:
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.ver.outputs.version) }}
           target_commitish: ${{ github.sha }}
-          name: SimConfigKeeper ${{ steps.ver.outputs.version }}
+          name: SimConfigManager ${{ steps.ver.outputs.version }}
           files: |
-            dist/SimConfigKeeper.exe
-            dist/SimConfigKeeper.exe.sha256
+            dist/SimConfigManager.exe
+            dist/SimConfigManager.exe.sha256
           generate_release_notes: true

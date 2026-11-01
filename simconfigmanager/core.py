@@ -1,10 +1,10 @@
 """
-SimConfigKeeper core engine.
+SimConfigManager core engine.
 
 A small, git-like version store for individual files that can live anywhere
 on disk (P3D .cfg/.xml, ProSim config.xml, etc.).
 
-Storage layout (data dir, default %APPDATA%\\SimConfigKeeper):
+Storage layout (data dir, default %APPDATA%\\SimConfigManager):
     repo.db                 SQLite: tracked files, snapshots, restore points, rules, events
     objects/ab/cdef...      zlib-compressed file contents, addressed by SHA-256 (like git blobs)
 
@@ -34,21 +34,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-APP_NAME = "SimConfigKeeper"
-APP_VERSION = "1.3.0"
+APP_NAME = "SimConfigManager"
+APP_VERSION = "1.4.0"
+LEGACY_NAMES = ("SimConfigKeeper",)   # earlier name of this app (≤ 1.3)
 
 
 # --------------------------------------------------------------------------- helpers
 
 def default_data_dir() -> Path:
-    """C:\\ProgramData\\SimConfigKeeper — shared by every account, so it is the same store whether the
-    app runs elevated or not. An existing store in %APPDATA% (v1.0) keeps being used."""
-    old = Path(os.environ.get("APPDATA") or os.path.join(Path.home(), ".config")) / APP_NAME
-    if (old / "repo.db").exists():
-        return old
-    if sys.platform == "win32":
-        return Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / APP_NAME
-    return old
+    """C:\\ProgramData\\SimConfigManager — shared by every account, so it is the same store whether the
+    app runs elevated or not. Stores created by earlier versions (old name / %APPDATA%) keep being used."""
+    appdata = Path(os.environ.get("APPDATA") or os.path.join(Path.home(), ".config"))
+    progdata = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) if sys.platform == "win32" else None
+    candidates = []
+    for name in (APP_NAME,) + LEGACY_NAMES:
+        if progdata:
+            candidates.append(progdata / name)
+        candidates.append(appdata / name)
+    for c in candidates:
+        if (c / "repo.db").exists():
+            return c
+    return (progdata or appdata) / APP_NAME
 
 
 def now_ts() -> float:
@@ -1145,7 +1151,7 @@ class Repo:
 
 class FolderSync:
     """
-    Sync via any shared folder: Google Drive for Desktop (e.g. G:\\My Drive\\SimConfigKeeper),
+    Sync via any shared folder: Google Drive for Desktop (e.g. G:\\My Drive\\SimConfigManager),
     a network share on a local server (\\\\server\\SimConfig), Dropbox, OneDrive...
 
     Each PC only ever writes its own manifest (machines/<name>.json); objects are immutable and
@@ -1327,7 +1333,7 @@ def import_manifest(repo: "Repo", m: dict, fetch: Callable[[str], bytes], source
 
 # --------------------------------------------------------------------------- certification archive
 
-ARCHIVE_FORMAT = "SimConfigKeeper-archive/1"
+ARCHIVE_FORMAT = "SimConfigManager-archive/1"   # older archives say SimConfigKeeper-archive/1
 
 
 def export_archive(repo: "Repo", zip_path: str, note: str = "", include_history: bool = True,
@@ -1468,7 +1474,7 @@ class Archive:
         self.zip = zipfile.ZipFile(zip_path)
         names = set(self.zip.namelist())
         if "archive.json" not in names:
-            raise ValueError("This zip is not a SimConfigKeeper archive (no archive.json).")
+            raise ValueError("This zip is not a SimConfigManager archive (no archive.json).")
         self.index = json.loads(self.zip.read("archive.json"))
         self.has_history = "history/manifest.json" in names
 
@@ -1703,20 +1709,47 @@ def _task_xml() -> str:
 
 
 def _remove_run_key():
-    try:
-        import winreg  # type: ignore
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
-            winreg.DeleteValue(k, APP_NAME)
-    except OSError:
-        pass
+    for name in (APP_NAME,) + LEGACY_NAMES:
+        try:
+            import winreg  # type: ignore
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+                winreg.DeleteValue(k, name)
+        except OSError:
+            pass
+
+
+def _task_exists(name: str) -> bool:
+    import subprocess
+    r = subprocess.run(["schtasks", "/Query", "/TN", name], capture_output=True, **_no_window())
+    return r.returncode == 0
+
+
+def migrate_legacy_autostart() -> bool:
+    """If the app was set to start at logon under its old name, move that to the new task. Needs admin."""
+    if sys.platform != "win32":
+        return False
+    import subprocess
+    found = False
+    for name in LEGACY_NAMES:
+        if _task_exists(name):
+            subprocess.run(["schtasks", "/Delete", "/TN", name, "/F"], capture_output=True, **_no_window())
+            found = True
+        try:
+            import winreg  # type: ignore
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+                winreg.QueryValueEx(k, name)
+                found = True
+        except OSError:
+            pass
+    if found:
+        set_autostart(True)
+    return found
 
 
 def autostart_enabled() -> bool:
     if sys.platform != "win32":
         return False
-    import subprocess
-    r = subprocess.run(["schtasks", "/Query", "/TN", TASK_NAME], capture_output=True, **_no_window())
-    return r.returncode == 0
+    return _task_exists(TASK_NAME)
 
 
 def set_autostart(enabled: bool) -> bool:

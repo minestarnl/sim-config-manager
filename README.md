@@ -1,25 +1,36 @@
-# SimConfigKeeper
+# Sim Config Manager
 
 Keeps track of Prepar3D / ProSim (or any) config files on your sims, like git: every change is
 recorded, you can see exactly what changed, and you can put everything back with one button.
 
+![Versions overview — which files differ from the current version](docs/screenshots/versions.png)
+
+## Screenshots
+
+| | |
+|---|---|
+| **Quick restore** — one button per saved setup ![](docs/screenshots/quick-restore.png) | **Files** — every tracked file with its full history ![](docs/screenshots/files.png) |
+| **Editor** — syntax highlighting, find & replace ![](docs/screenshots/editor-cfg.png) | **Live syntax check** — broken XML marked before you save ![](docs/screenshots/editor-xml-check.png) |
+| **Alerts** — notifications and auto-undo for specific changes ![](docs/screenshots/alerts.png) | **Create version** — release notes pre-filled with what changed ![](docs/screenshots/create-version.png) |
+| **Differences** — exactly what changed, line by line ![](docs/screenshots/diff.png) | |
+
 ## Download
 
-Get **SimConfigKeeper.exe** from the [latest release](../../releases/latest) — no Python needed.
+Get **SimConfigManager.exe** from the [latest release](../../releases/latest) — no Python needed.
 Every push to `main` is also built automatically: *Actions* tab → latest run → *Artifacts*.
 
-To publish a new release, raise `APP_VERSION` in `simconfigkeeper/core.py` and push to `main` — the build
+To publish a new release, raise `APP_VERSION` in `simconfigmanager/core.py` and push to `main` — the build
 publishes `v<version>` automatically (existing releases are never overwritten).
 
 ## Install (on each sim PC)
 
-1. Download `SimConfigKeeper.exe` (or build it yourself: install Python 3.10+ from python.org, tick
-   "Add python.exe to PATH", then double-click **build_exe.bat** → `dist\SimConfigKeeper.exe`).
-2. Copy the exe to e.g. `C:\SimConfigKeeper\` on each sim and run it.
+1. Download `SimConfigManager.exe` (or build it yourself: install Python 3.10+ from python.org, tick
+   "Add python.exe to PATH", then double-click **build_exe.bat** → `dist\SimConfigManager.exe`).
+2. Copy the exe to e.g. `C:\SimConfigManager\` on each sim and run it.
 3. Windows asks for administrator rights when it starts (needed to restore files under Program Files /
    ProgramData) — click **Yes**.
 4. *Settings* tab: give the PC a name (`Sim 1`, `Sim 2`) and tick **Start with Windows as administrator**.
-   This creates a Task Scheduler task ("SimConfigKeeper", run with highest privileges at logon), so it starts
+   This creates a Task Scheduler task ("SimConfigManager", run with highest privileges at logon), so it starts
    elevated at boot **without** a UAC prompt. (The normal Startup/Run method cannot start admin programs.)
 
 (The exe can be built once and copied to both sims. `run_from_source.bat` runs it without building.)
@@ -31,7 +42,7 @@ publishes `v<version>` automatically (existing releases are never overwritten).
    Anything else: **Add files…** (any location) or **Add folder…** (all *.xml/*.cfg in a folder).
 2. Set the sim up the way it should be, then **Quick restore → Save current setup as restore point…**
    (e.g. "Customer default", "Checkride 737", "Maintenance"). Right-click a button to colour it.
-3. **Cloud / other sims**: choose a folder inside Google Drive (e.g. `G:\My Drive\SimConfigKeeper`)
+3. **Cloud / other sims**: choose a folder inside Google Drive (e.g. `G:\My Drive\SimConfigManager`)
    or a share on your server (`\\SERVER\SimConfig`). Use the same folder on both sims.
 
 ## What it does
@@ -131,15 +142,23 @@ Restore points can also be exported this way (right-click a restore point → Ex
 ```
 pip install -r requirements.txt pytest
 python -m pytest tests                                   # engine tests
-python SimConfigKeeper.pyw --no-elevate --data .\testdata  # run with a throw-away data folder
+python SimConfigManager.pyw --no-elevate --data .\testdata  # run with a throw-away data folder
 ```
 
-`simconfigkeeper/core.py` — storage, snapshots, versions, rules, sync, archives ·
+`simconfigmanager/core.py` — storage, snapshots, versions, rules, sync, archives ·
 `gui.py` — main window · `editor.py` — built-in editor.
+Regenerate the README screenshots with `QT_QPA_PLATFORM=offscreen python tools/make_screenshots.py`.
+
+## Upgrading from SimConfigKeeper (≤ 1.3)
+
+The app was renamed in 1.4. Quit the old *SimConfigKeeper* from the tray, then start
+`SimConfigManager.exe`: it picks up the existing data (history, versions, restore points, rules), and if
+"Start with Windows" was on, it replaces the old startup task with the new one. The old exe can be deleted.
 
 ## Notes
 
-* Data lives in `C:\ProgramData\SimConfigKeeper` (v1.0 installs keep using `%APPDATA%\SimConfigKeeper`) (SQLite + compressed copies of every version).
+* Data lives in `C:\ProgramData\SimConfigManager` (SQLite + compressed copies of every version). Installs
+  from before the rename (*SimConfigKeeper*, ≤ 1.3) keep using their existing data folder automatically.
   Nothing is ever deleted from history.
 * Sync never conflicts: each PC writes only its own `machines\<name>.json`; file versions are stored
   by content hash. Changing a PC's name starts a new manifest (the old one stays as a backup).

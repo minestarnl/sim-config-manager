@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from simconfigkeeper.core import Repo, Rule, FolderSync, evaluate_rule, Change, TrackedFile  # noqa: E402
+from simconfigmanager.core import Repo, Rule, FolderSync, evaluate_rule, Change, TrackedFile  # noqa: E402
 
 CFG = """[GRAPHICS]
 TEXTURE_MAX_LOAD=4096
@@ -118,7 +118,7 @@ def test_all():
 def test_archive():
     import zipfile
     import xml.etree.ElementTree as ET
-    from simconfigkeeper import core
+    from simconfigmanager import core
     tmp = Path(tempfile.mkdtemp())
     home1 = tmp / "home1" / "AppData" / "Roaming"
     (home1 / "P3D").mkdir(parents=True)
@@ -173,7 +173,7 @@ def test_archive():
 
 
 def test_versions():
-    from simconfigkeeper import core
+    from simconfigmanager import core
     tmp = Path(tempfile.mkdtemp())
     a, b = tmp / "a.cfg", tmp / "b.xml"
     touch(a, CFG)
