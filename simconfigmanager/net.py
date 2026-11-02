@@ -204,7 +204,7 @@ class NetworkServer:
                 key = next((k for k in server.keys if token and hmac.compare_digest(k["key"], token)), None)
                 if key is None:
                     return rpc_error(-32001, 401, f"Access key not accepted by {APP_NAME} on this sim PC. Ask for "
-                                                  f"a new key in the app's Claude tab → Network access.")
+                                                  f"a new key on the sim: AI & network → Add person.")
                 if msg is None:
                     return rpc_error(-32700, 400, "Parse error")
                 ip = self.client_address[0]

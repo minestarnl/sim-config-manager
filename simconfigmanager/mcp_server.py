@@ -2,7 +2,7 @@
 Claude connector for SimConfigManager — a Model Context Protocol (MCP) server over stdio.
 
 Lets Claude (Claude Desktop on the sim PC) read the tracked config files, their history, versions and the
-other sims' files from the sync folder, and *propose* edits. It never writes a config file itself:
+other sims' files from the shared location, and *propose* edits. It never writes a config file itself:
 proposals wait in the main app until a person approves them.
 
 Run:   SimConfigManager-MCP.exe            (built exe)
@@ -24,12 +24,12 @@ SERVER_NAME = "sim-config-manager"
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 INSTRUCTIONS = (
-    "Read-only access to the flight-simulator configuration files tracked by SimConfigManager (Prepar3D "
-    "cfg/xml, ProSim config.xml, etc.), their full change history, numbered configuration versions, and the "
-    "other simulators' files via the sync folder. Start with `overview`. Use `read_file` to read a file "
+    "Read access to the flight-simulator configuration files tracked by Sim Config Manager (Prepar3D "
+    "cfg/xml, ProSim config.xml, etc.), their full change history, numbered versions, the rulebook, and the "
+    "other sims' files via the shared location. Start with `overview`. Use `read_file` to read a file "
     "(with line numbers), `search` to find settings across all files, `diff` to see what changed. "
     "To change a file use `propose_change`: the change is NOT applied until a person approves it in the "
-    "SimConfigManager app, so explain clearly why in `reason`. Check `rulebook` first: required values there are "
+    "Sim Config Manager app, so explain clearly why in `reason`. Check `rulebook` first: required values there are "
     "locked and changes that break them are refused. System-information entries (GPU driver, Windows, software, "
     "displays) are read-only. Prepar3D rewrites Prepar3D.cfg when it exits, "
     "so changes to it should be applied with the sim closed."
@@ -93,7 +93,7 @@ def remote_file(repo: Repo, machine: str, ref: Any) -> tuple[dict, Optional[byte
     names = [m["machine"] for m in s.machines()]
     match = next((n for n in names if n.lower() == str(machine).lower()), None)
     if not match:
-        raise ToolError(f"No sim called '{machine}' in the sync folder. Known: {', '.join(names) or 'none'}")
+        raise ToolError(f"No sim called '{machine}' in the shared location. Known: {', '.join(names) or 'none'}")
     files = [f for f in s.remote_latest(match) if f.get("active", True)]
     r = str(ref).lower()
     hits = [f for f in files if (f.get("label") or "").lower() == r] or \
@@ -167,7 +167,7 @@ def t_overview(repo: Repo, a: dict) -> str:
     out.append("Groups: " + ", ".join(f"{g} ({n})" for g, n in sorted(groups.items())))
     if ver:
         mism = [x for x in status if x.status in ("modified", "missing", "new")]
-        out.append(f"Current configuration version: {ver.label} ({core.fmt_ts(ver.created_at)}, by "
+        out.append(f"Current version: {ver.label} ({core.fmt_ts(ver.created_at)}, by "
                    f"{ver.created_by or '-'})")
         if mism:
             out.append(f"{len(mism)} file(s) differ from it:")
@@ -175,7 +175,7 @@ def t_overview(repo: Repo, a: dict) -> str:
         else:
             out.append("All files match that version.")
     else:
-        out.append("No configuration version has been created yet.")
+        out.append("No version has been created yet.")
     rps = repo.restore_points()
     if rps:
         out.append("Restore points: " + ", ".join(r.name for r in rps))
@@ -191,7 +191,7 @@ def t_overview(repo: Repo, a: dict) -> str:
         try:
             others = [m["machine"] for m in remote(repo).machines() if m["machine"] != repo.machine]
             if others:
-                out.append("Other sims readable via the sync folder: " + ", ".join(others))
+                out.append("Other sims readable via the shared location: " + ", ".join(others))
         except ToolError as e:
             out.append(str(e))
     pend = core.list_proposals(repo, "pending")
@@ -206,7 +206,7 @@ def t_list_files(repo: Repo, a: dict) -> str:
         names = [x["machine"] for x in s.machines()]
         name = next((n for n in names if n.lower() == str(a["machine"]).lower()), None)
         if not name:
-            raise ToolError(f"No sim called '{a['machine']}' in the sync folder. Known: {', '.join(names) or 'none'}")
+            raise ToolError(f"No sim called '{a['machine']}' in the shared location. Known: {', '.join(names) or 'none'}")
         files = [f for f in s.remote_latest(name) if f.get("active", True)]
         return "\n".join(f"{f.get('label')}  [{f.get('group', '')}]  {f['path']}" +
                          ("  (missing)" if not f["hash"] else "") for f in files) or "No files."
@@ -316,7 +316,7 @@ def t_file_history(repo: Repo, a: dict) -> str:
 def t_list_versions(repo: Repo, a: dict) -> str:
     vers = repo.versions()
     if not vers:
-        return "No configuration versions yet."
+        return "No versions yet."
     out = []
     for i, v in enumerate(vers):
         prev = vers[i + 1] if i + 1 < len(vers) else None
@@ -334,7 +334,7 @@ def t_version_status(repo: Repo, a: dict) -> str:
         num = int(num.lstrip("vV"))
     ver, status = repo.version_status(num)
     if not ver:
-        return "No configuration version exists yet."
+        return "No version exists yet."
     rows = [f"Files on disk compared with {ver.label}:"]
     for x in sorted(status, key=lambda x: (x.status == "match", x.file.display)):
         rows.append(f"  {core.STATUS_TEXT.get(x.status, x.status):<22} {x.file.display} [{x.file.group}]")
@@ -349,7 +349,7 @@ def t_recent_events(repo: Repo, a: dict) -> str:
 def t_list_other_sims(repo: Repo, a: dict) -> str:
     ms = remote(repo).machines()
     return "\n".join(f"{m['machine']}{' (this PC)' if m['machine'] == repo.machine else ''}: {m['files']} files, "
-                     f"last upload {core.fmt_ts(m['updated'])}" for m in ms) or "Nothing in the sync folder yet."
+                     f"last upload {core.fmt_ts(m['updated'])}" for m in ms) or "Nothing in the shared location yet."
 
 
 def t_compare_with_other_sim(repo: Repo, a: dict) -> str:
@@ -445,16 +445,16 @@ def t_list_proposals(repo: Repo, a: dict) -> str:
 
 FILE = {"type": ["string", "integer"], "description": "File id, name (e.g. 'Prepar3D.cfg', 'ProSim config.xml') "
                                                       "or a unique part of its path"}
-VERSION = {"type": "string", "description": "'current' (default), a configuration version like 'v3', a snapshot "
+VERSION = {"type": "string", "description": "'current' (default), a version like 'v3', a snapshot "
                                             "like '#42', or a restore point name"}
 
 TOOLS = {
-    "overview": (t_overview, "Start here: this sim PC, tracked file groups, current configuration version and "
-                             "which files differ from it, recent alerts, other sims, pending proposals.", {}, []),
+    "overview": (t_overview, "Start here: this sim PC, tracked file groups, the current version and which "
+                             "files differ from it, recent alerts, other sims, proposed changes waiting for approval.", {}, []),
     "list_files": (t_list_files, "List tracked config files with id, group, size, path and status versus the "
-                                 "current version. With 'machine', lists another sim's files from the sync folder.",
+                                 "current version. With 'machine', lists another sim's files from the shared location.",
                    {"machine": {"type": "string", "description": "Another sim's PC name (optional)"}}, []),
-    "read_file": (t_read_file, "Read a config file with line numbers — now, or as it was in a version/snapshot/"
+    "read_file": (t_read_file, "Read a config file with line numbers — now, or as it was in a version, snapshot or "
                                "restore point, or on another sim. Long files are paged (offset/limit).",
                   {"file": FILE, "version": VERSION,
                    "machine": {"type": "string", "description": "Read the file from another sim (optional)"},
@@ -466,20 +466,20 @@ TOOLS = {
                {"pattern": {"type": "string", "description": "Regular expression, case-insensitive by default"},
                 "file": FILE, "group": {"type": "string", "description": "Only files whose group contains this"},
                 "case_sensitive": {"type": "boolean"}}, ["pattern"]),
-    "diff": (t_diff, "Unified diff of one file between two versions. Defaults: from = current configuration "
-                     "version, to = the file on disk now.",
+    "diff": (t_diff, "Unified diff of one file between two moments. Defaults: from = the current version, "
+                     "to = the file on disk now.",
              {"file": FILE, "from": VERSION, "to": VERSION}, ["file"]),
-    "file_history": (t_file_history, "Every recorded version of one file with time, size of change and note.",
+    "file_history": (t_file_history, "Every recorded revision of one file with time, size of change and note.",
                      {"file": FILE, "limit": {"type": "integer"}}, ["file"]),
-    "list_versions": (t_list_versions, "All numbered configuration versions with their release notes.", {}, []),
-    "version_status": (t_version_status, "Which files match / differ from a configuration version (default latest).",
+    "list_versions": (t_list_versions, "All numbered versions (v1, v2, …) with their release notes.", {}, []),
+    "version_status": (t_version_status, "Which files match or differ from a version (default: the current one).",
                        {"version": {"type": ["integer", "string"], "description": "e.g. 3 or 'v3'"}}, []),
     "recent_events": (t_recent_events, "Recent events: alerts, restores, edits, versions created.",
                       {"limit": {"type": "integer"}}, []),
-    "list_other_sims": (t_list_other_sims, "Other simulator PCs whose configs are available via the sync folder.",
+    "list_other_sims": (t_list_other_sims, "Other sim PCs whose files are available via the shared location.",
                         {}, []),
-    "compare_with_other_sim": (t_compare_with_other_sim, "Diff a file on this PC against the same file on another "
-                                                         "sim (latest synced version).",
+    "compare_with_other_sim": (t_compare_with_other_sim, "Diff a file on this sim against the same file on another "
+                                                         "sim (its latest upload to the shared location).",
                                {"file": FILE, "machine": {"type": "string"},
                                 "other_file": {"type": "string", "description": "Name on the other sim if different"}},
                                ["file", "machine"]),
@@ -499,7 +499,7 @@ TOOLS = {
                        ["file", "reason"]),
     "rulebook": (t_rulebook, "The settings rulebook: documented settings with notes, and LOCKED required values "
                              "(with live compliance). Check it before suggesting changes.", {}, []),
-    "list_proposals": (t_list_proposals, "Proposed changes and whether they were applied or rejected.", {}, []),
+    "list_proposals": (t_list_proposals, "Proposed changes and whether they were applied, rejected or are waiting for approval.", {}, []),
 }
 READ_ONLY = {k for k in TOOLS if k != "propose_change"}
 
@@ -654,7 +654,7 @@ def main(argv=None):
     ap.add_argument("--data", default=None, help="data folder (default: the app's data folder)")
     ap.add_argument("--remote", default=None, metavar="URL",
                     help="relay to a sim PC on the network, e.g. http://192.168.1.20:8765/mcp")
-    ap.add_argument("--key", default=None, help="access key for --remote (from the sim PC's Claude tab)")
+    ap.add_argument("--key", default=None, help="access key for --remote (on the sim: AI & network → Add person)")
     args = ap.parse_args(argv)
     # Nothing but protocol messages may go to stdout.
     real_out = sys.stdout.buffer

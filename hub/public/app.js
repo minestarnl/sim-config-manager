@@ -101,9 +101,9 @@ function simCard(s) {
     el("div", { class: "name" }, ic(icon, cls), s.name, el("span", { class: "grow" }),
       s.maintenance?.on ? el("span", { class: "pill maint-t" }, "MAINTENANCE") : "",
       el("span", { class: `pill ${s.ready ? "ok-t" : "bad-t"}` }, s.ready ? "GO" : "NO-GO")),
-    el("div", {}, s.version ? `v${s.version.number} – ${s.version.title || ""}` : el("span", { class: "muted" }, "no configuration version")),
+    el("div", {}, s.version ? `v${s.version.number} – ${s.version.title || ""}` : el("span", { class: "muted" }, "No version yet")),
     s.problems.length ? el("ul", { class: `small ${cls}` }, s.problems.slice(0, 4).map((p) => el("li", {}, p)))
-      : el("div", { class: "ok-t small" }, "All files match the version, rulebook OK"),
+      : el("div", { class: "ok-t small" }, "All files match the current version · rulebook OK"),
     el("div", { class: "meta" }, `${s.online ? "Online" : "Last seen"} · ${ago(s.lastSeen)}`,
       s.driver ? ` · GPU driver ${s.driver}` : "", s.appVersion ? ` · app ${s.appVersion}` : ""));
 }
@@ -120,7 +120,7 @@ function viewFleet(v) {
     SIMS.length ? el("div", { class: "grid" }, SIMS.map(simCard))
       : el("div", { class: "section" }, el("h3", {}, "No sims yet"),
         can("admin") ? el("div", {}, "Add your sims under ", el("a", { href: "#/admin" }, "Sims & settings"),
-          ", then paste the hub address and key into each sim's app (Cloud tab → Central dashboard).")
+          ", then enter the Hub address and sim key in Sim Config Manager on each sim (Sharing → Hub).")
           : "An administrator has to add the sims first."));
 }
 
@@ -134,7 +134,7 @@ function viewBoard(v) {
         : s.ready ? ["GO", "ok-t"] : ["NO-GO", "bad-t"];
       return el("div", { class: `tile ${cls}` }, el("div", { class: "nm" }, s.name),
         el("div", { class: `big ${big[1]}` }, big[0]),
-        el("div", { class: "muted" }, s.version ? `v${s.version.number} – ${s.version.title || ""}` : "no version"),
+        el("div", { class: "muted" }, s.version ? `v${s.version.number} – ${s.version.title || ""}` : "No version yet"),
         s.maintenance?.on && s.maintenance.note ? el("div", { class: "maint-t" }, s.maintenance.note) : "",
         !s.ready && !s.maintenance?.on ? el("div", { class: "small bad-t" }, s.problems.slice(0, 2).join(" · ")) : "");
     })));
@@ -166,15 +166,15 @@ async function viewSim(v, id) {
     s.maintenance?.on ? el("div", { class: "banner maint" }, ic("tools"),
       ` In maintenance since ${fmt(s.maintenance.since)} (${s.maintenance.by})${s.maintenance.note ? " — " + s.maintenance.note : ""}. Notifications are muted.`) : "",
     el("div", { class: "stats" }, [
-      [s.version ? `v${s.version.number}` : "–", s.version?.title || "Configuration version"],
-      [s.mismatches, "Files differ"], [s.violations, "Rulebook broken"], [s.alerts24h, "Alerts (24 h)"],
-      [s.pending, "Waiting for approval"], [r.files ?? "–", "Tracked files"]].map(([n, l]) =>
+      [s.version ? `v${s.version.number}` : "–", s.version?.title || "Current version"],
+      [s.mismatches, "Files that differ"], [s.violations, "Rulebook broken"], [s.alerts24h, "Alerts (24 h)"],
+      [s.pending, "Proposed changes"], [r.files ?? "–", "Tracked files"]].map(([n, l]) =>
       el("div", { class: "stat" }, el("div", { class: "n" }, n), el("div", { class: "l" }, l)))),
     el("div", { class: "cols" },
       el("div", {},
         sec("Problems", s.problems.length ? el("ul", {}, s.problems.map((p) => el("li", { class: cls }, p)))
           : el("div", { class: "ok-t" }, ic("check"), " Nothing to report — ready for a session")),
-        files.length ? sec("Files that differ from the version", el("table", {}, el("tr", {}, el("th", {}, "File"), el("th", {}, "Group"), el("th", {}, "Status")),
+        files.length ? sec("Files that differ from the current version", el("table", {}, el("tr", {}, el("th", {}, "File"), el("th", {}, "Group"), el("th", {}, "Status")),
           files.map((f) => el("tr", {}, el("td", {}, f.file), el("td", { class: "muted" }, f.group), el("td", { class: "warn-t" }, f.status_text || f.status))))) : "",
         (r.rulebook || []).length ? sec("Rulebook", el("table", {}, el("tr", {}, el("th", {}, ""), el("th", {}, "Setting"), el("th", {}, "Required"), el("th", {}, "Current")),
           r.rulebook.map((b) => el("tr", {}, el("td", { class: b.ok === false ? "bad-t" : b.ok ? "ok-t" : "muted" }, ic(b.ok === false ? "error" : b.ok ? "check" : "circle")),
@@ -182,7 +182,7 @@ async function viewSim(v, id) {
         sec("Uptime (last 7 days)", el("div", { class: "uptime" }, up.days.map((x) => el("div", { title: `${x.day}: ${x.pct}%`, style: `height:${Math.max(2, x.pct)}%` }))),
           el("div", { class: "row small muted", style: "justify-content:space-between" }, el("span", {}, up.days[0]?.day), el("span", {}, "today")),
           el("div", { class: "small muted", style: "margin-top:8px" }, "Last 24 hours"), el("div", { class: "strip" }, up.last24h.map((x) => el("div", { class: x ? "on" : "off" })))),
-        sec("Configuration versions", (r.versions || []).length ? el("table", {}, (r.versions || []).map((x) =>
+        sec("Versions", (r.versions || []).length ? el("table", {}, (r.versions || []).map((x) =>
           el("tr", {}, el("td", {}, el("b", {}, `v${x.number}`)), el("td", {}, x.title || ""), el("td", { class: "muted small" }, fmt(x.created_at)), el("td", { class: "muted small" }, x.created_by || ""))))
           : el("div", { class: "muted" }, "No versions yet"))),
       el("div", {},
@@ -225,13 +225,13 @@ async function viewEvents(v) {
 }
 
 async function viewAdmin(v) {
-  setHead("Sims & settings", "Add sims and give each its own hub key");
+  setHead("Sims & settings", "Add sims and give each its own key");
   if (!can("admin")) { v.replaceChildren(el("div", { class: "banner err" }, "Admins only.")); return; }
   const name = el("input", { placeholder: "Sim name, e.g. Sim 1" });
-  const showKey = (simName, key) => modal(el("h3", { style: "margin:0" }, `Hub key for ${simName}`),
-    el("div", {}, "Shown only once. In the SimConfigManager app on that sim: ", el("b", {}, "Cloud tab → Central dashboard"), ", tick ", el("b", {}, "Report to a central dashboard"), " and paste:"),
+  const showKey = (simName, key) => modal(el("h3", { style: "margin:0" }, `Key for ${simName}`),
+    el("div", {}, "Shown only once. In Sim Config Manager on that sim: ", el("b", {}, "Sharing → Hub"), ", tick ", el("b", {}, "Report this sim's status to a Hub"), " and enter:"),
     el("div", { class: "muted" }, "Hub address"), el("code", { class: "key" }, location.origin),
-    el("div", { class: "muted" }, "Hub key"), el("code", { class: "key" }, key),
+    el("div", { class: "muted" }, "Sim key"), el("code", { class: "key" }, key),
     el("div", { class: "row" }, el("button", { onclick: () => navigator.clipboard?.writeText(key) }, "Copy key"),
       el("span", { class: "grow" }), el("button", { class: "primary", onclick: () => { closeModal(); route(); } }, "Done")));
   const rows = SIMS.map((s) => el("tr", {}, el("td", {}, el("b", {}, s.name)), el("td", { class: STATE[s.state][1] }, STATE[s.state][0]),

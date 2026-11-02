@@ -30,10 +30,10 @@ export function simState(sim, now, offlineMs) {
   const problems = [];
   if (!sim.lastSeen) problems.push("Never reported");
   else if (!online) problems.push("Offline");
-  if (!r.version && sim.lastSeen) problems.push("No configuration version yet");
+  if (!r.version && sim.lastSeen) problems.push("No version yet");
   if (mism.length) problems.push(`${mism.length} file(s) differ from v${r.version?.number ?? "?"}`);
   if (viol.length) problems.push(`Rulebook broken: ${viol.join(", ")}`);
-  if (r.pending_proposals) problems.push(`${r.pending_proposals} change(s) waiting for approval`);
+  if (r.pending_proposals) problems.push(`${r.pending_proposals} proposed change(s) waiting for approval`);
   let state = "ok";
   if (!online) state = "offline";
   else if (viol.length || mism.some((m) => m.status === "missing")) state = "bad";

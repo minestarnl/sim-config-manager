@@ -110,7 +110,7 @@ class SharingPage:
         hl.addRow("Hub address:", self.hub_url)
         self.hub_key = QLineEdit(self.repo.get("hub_key"))
         self.hub_key.setEchoMode(QLineEdit.Password)
-        self.hub_key.setPlaceholderText("Key for this sim (in the Hub: Settings → Sims → Add sim)")
+        self.hub_key.setPlaceholderText("Key for this sim (in the Hub: Sims & settings → Add sim)")
         hl.addRow("Sim key:", self.hub_key)
         self.hub_status = QLabel()
         self.hub_status.setTextFormat(Qt.RichText)
