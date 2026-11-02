@@ -425,12 +425,6 @@ python SimConfigManager.pyw --no-elevate --data .\testdata  # run with a throw-a
 (`cd hub && npm test`). Hub screenshots: `python tools/hub_screenshots.py`.
 Regenerate the README screenshots with `QT_QPA_PLATFORM=offscreen python tools/make_screenshots.py`.
 
-## Upgrading from SimConfigKeeper (≤ 1.3)
-
-The app was renamed in 1.4. Quit the old *SimConfigKeeper* from the tray, then start
-`SimConfigManager.exe`: it picks up the existing data (history, versions, restore points, rules), and if
-"Start with Windows" was on, it replaces the old startup task with the new one. The old exe can be deleted.
-
 ## Notes
 
 * Data lives in `C:\ProgramData\SimConfigManager` (SQLite + compressed copies of every version). Installs
