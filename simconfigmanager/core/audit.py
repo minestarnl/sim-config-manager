@@ -37,8 +37,9 @@ def enable_file_auditing(repo) -> dict:
         "$rule = New-Object System.Security.AccessControl.FileSystemAuditRule('Everyone', "
         "'WriteData,AppendData,Delete,WriteAttributes', 'None', 'None', 'Success'); "
         "$ok = 0; $bad = @(); foreach ($p in @(" + ",".join(winsys.ps_quote(p) for p in paths) + ")) { "
-        "try { $acl = Get-Acl -LiteralPath $p -Audit; $acl.AddAuditRule($rule); "
-        "Set-Acl -LiteralPath $p -AclObject $acl -ErrorAction Stop; $ok++ } catch { $bad += $p } }; "
+        # only the audit part (SACL) is written; Set-Acl would also try to rewrite the owner and can fail on that
+        "try { $it = Get-Item -LiteralPath $p; $acl = $it.GetAccessControl('Audit'); $acl.AddAuditRule($rule); "
+        "$it.SetAccessControl($acl); $ok++ } catch { $bad += ($p + ': ' + $_.Exception.Message) } }; "
         "[pscustomobject]@{ok=$ok; failed=$bad}")
     res = winsys.powershell_json("enable_audit", script, 120, paths)
     if not res:
