@@ -251,4 +251,4 @@ def maintenance_log(repo, limit: int = 100) -> list[dict]:
                                         "t.id=l.task_id ORDER BY l.ts DESC LIMIT ?", (limit,))]
 
 
-__all__ = ["pjlink_query", "describe_projector", "health_warnings", "LIMITS"]
+__all__ = ["pjlink_query", "describe_projector", "health_warnings", "disk_health", "LIMITS"]

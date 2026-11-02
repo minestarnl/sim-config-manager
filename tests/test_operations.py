@@ -82,8 +82,8 @@ def test_live_data_bridge_install():
     repo.set("simlink_file", str(tmp / "simlink.json"))
     fs = tmp / "FSUIPC6"
     fs.mkdir()
-    (fs / "FSUIPC6.ini").write_text("[General]\r\nUpdatedByVersion=7000\r\n\r\n[Auto]\r\n1=Lua Display Vals\r\n\r\n"
-                                    "[Buttons]\r\n")
+    (fs / "FSUIPC6.ini").write_bytes(b"[General]\r\nUpdatedByVersion=7000\r\n\r\n[Auto]\r\n1=Lua Display Vals\r\n\r\n"
+                                     b"[Buttons]\r\n")
     ini = repo.install_bridge(str(fs))
     text = Path(ini).read_bytes().decode()
     assert "[Auto]\r\n1=Lua Display Vals\r\n2=Lua SimConfigManager\r\n" in text
@@ -95,7 +95,7 @@ def test_live_data_bridge_install():
     assert tracked and len(repo.file_history(tracked.id)) >= 2         # the change is in History
     fs2 = tmp / "F2"
     fs2.mkdir()
-    (fs2 / "FSUIPC5.ini").write_text("[General]\nX=1\n")
+    (fs2 / "FSUIPC5.ini").write_bytes(b"[General]\nX=1\n")
     assert "[Auto]\n1=Lua SimConfigManager\n" in Path(repo.install_bridge(str(fs2))).read_bytes().decode()
     (tmp / "simlink.json").write_text(json.dumps({"ts": time.time(), "fps": 33.0, "aircraft": "x"}))
     assert repo.live_data()["fps"] == 33.0
