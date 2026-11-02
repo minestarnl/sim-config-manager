@@ -304,7 +304,135 @@ w.go("rulebook")
 w.refresh_all()
 shot(w, "rulebook.png")
 
-# 12. fleet overview: Sim 2 and Sim 3 share their status through a stand-in Google Drive
+# 12. operations: sessions, hardware & health, installs & integrity, templates (Windows parts faked)
+from simconfigmanager.core import winsys  # noqa: E402
+import random  # noqa: E402
+random.seed(7)
+
+
+def demo_session(days_ago, minutes, version, fps, aircraft, kind="session", label="", crash=None, matches=True,
+                 samples=False):
+    start = time.time() - days_ago * 86400
+    stats = {"minutes": minutes, "avg_fps": fps, "median_fps": fps + 1, "low1_fps": round(fps * 0.62, 1),
+             "min_fps": round(fps * 0.4, 1), "stutters": int(max(0, 45 - fps) / 3), "max_gpu_temp": 70 + fps % 9,
+             "avg_gpu_temp": 66, "avg_gpu_util": 88, "aircraft": [aircraft]}
+    cur = repo.db.execute("INSERT INTO sessions(kind, label, started, ended, machine, version_number, version_matches, "
+                          "differing, aircraft, stats, crash, snapshot_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (kind, label, start, start + minutes * 60, repo.machine, version, 1 if matches else 0,
+                           "[]" if matches else '["Prepar3D.cfg"]', aircraft, json.dumps(stats),
+                           json.dumps(crash) if crash else "", repo.latest_snapshot().id))
+    if samples:
+        for i in range(int(minutes * 6)):
+            v = fps + random.uniform(-6, 6) - (14 if 40 < i < 44 else 0)
+            repo.db.execute("INSERT INTO session_samples(session_id, ts, fps, gpu_temp) VALUES(?,?,?,?)",
+                            (cur.lastrowid, start + i * 10, max(5, v), 68 + random.uniform(-2, 3)))
+    repo.db.commit()
+
+
+for i, (v, fps) in enumerate([(1, 34.0), (1, 33.1), (2, 41.5), (2, 42.8), (2, 40.2), (3, 41.9), (3, 40.7)]):
+    demo_session(12 - i * 1.4, 95 + i * 7, v, fps, "PMDG 737-800 KLM" if i % 2 else "PMDG 737-800 Transavia",
+                 crash={"crashes": [{"ts": time.time(), "app": "Prepar3D.exe", "module": "terrain.dll",
+                                     "code": "0xc0000005"}], "display_resets": []} if i == 1 else None)
+demo_session(0.9, 5, 3, 36.4, "PMDG 737-800 KLM", "benchmark", "A/B A: Checkride")
+demo_session(0.85, 5, 3, 42.1, "PMDG 737-800 KLM", "benchmark", "A/B B: LOD 4.5")
+demo_session(0.2, 104, 3, 38.6, "PMDG 737-800 KLM", matches=False, samples=True,
+             crash={"crashes": [], "display_resets": [{"ts": time.time() - 3600, "message": "Display driver "
+                                                       "nvlddmkm stopped responding and has successfully recovered."}]})
+w.live = {"running": True, "session": None, "benchmark": None,
+          "live": {"fps": 41.0, "aircraft": "PMDG 737-800 KLM"}, "gpu": {"temp": 69.0}}
+repo.db.execute("INSERT INTO sessions(kind, started, machine, version_number, version_matches, differing, aircraft) "
+                "VALUES('session', ?, ?, 3, 0, '[\"Prepar3D.cfg\", \"dll.xml\"]', 'PMDG 737-800 KLM')",
+                (time.time() - 2400, repo.machine))
+repo.db.commit()
+w.live["session"] = core.sessions.open_session(repo) if hasattr(core.sessions, "open_session") else None
+w.go("sessions")
+w.refresh_all()
+w.sess_table.selectRow(1)
+shot(w, "sessions.png")
+sd = None
+
+winsys.FAKES["devices"] = [
+    {"name": "PFC Cirrus II Yoke (Captain)", "cls": "HIDClass", "id": r"HID\VID_0EB0&PID_0100&MI_00\7&1A2B3C&0&0000", "status": "OK"},
+    {"name": "PFC Yoke (First Officer)", "cls": "HIDClass", "id": r"HID\VID_0EB0&PID_0101&MI_00\7&2B3C4D&0&0000", "status": "OK"},
+    {"name": "CPflight MCP737 (COM3)", "cls": "Ports", "id": r"USB\VID_0403&PID_6001\A10K3Z9", "status": "OK"},
+    {"name": "Leo Bodnar BU0836X", "cls": "HIDClass", "id": r"HID\VID_1DD2&PID_1001\8&3C4D5E&0&0000", "status": "OK"},
+    {"name": "USB Composite Device", "cls": "USB", "id": r"USB\VID_046D&PID_C52B\5&2F1&0&3", "status": "OK"},
+    {"name": "Logitech Throttle Quadrant", "cls": "HIDClass", "id": r"HID\VID_06A3&PID_0C2D\6&9F&0&0000", "status": "OK"}]
+for label, pat, note in (("Captain yoke", r"HID\VID_0EB0&PID_0100*", "PFC, left seat"),
+                         ("First officer yoke", r"HID\VID_0EB0&PID_0101*", "PFC, right seat"),
+                         ("MCP panel", r"USB\VID_0403&PID_6001*", "CPflight, COM3"),
+                         ("Overhead interface", r"HID\VID_1DD2&PID_1001*", "Leo Bodnar card behind the overhead"),
+                         ("Rudder pedals", r"HID\VID_06A3&PID_0763*", "Saitek combat pedals")):
+    repo.add_required_device(label, pat, note)
+repo.hardware_check()
+winsys.FAKES.update(disks=[{"name": "Samsung SSD 990 PRO 2TB", "media": "SSD", "health": "Healthy", "temp": 41, "wear": 3,
+                            "hours": 4210, "read_errors": 0},
+                           {"name": "Samsung SSD 870 EVO 4TB (scenery)", "media": "SSD", "health": "Healthy", "temp": 38,
+                            "wear": 9, "hours": 11800, "read_errors": 0}],
+                    gpu={"name": "NVIDIA GeForce RTX 4080", "temp": 66.0, "util": 91.0, "mem_used": 11200},
+                    pjlink=lambda host: {"POWR": "1", "LAMP": {"10.0.0.41": "2950 1", "10.0.0.42": "1210 1",
+                                                                 "10.0.0.43": "1180 1"}[host],
+                                         "ERST": "000000" if host != "10.0.0.41" else "000010", "NAME": "x"})
+for n, h in (("Left", "10.0.0.41"), ("Centre", "10.0.0.42"), ("Right", "10.0.0.43")):
+    repo.save_projector({"name": n, "host": h, "lamp_life": 3000})
+repo.health_check()
+for name, days, hours, ago_d, note in (("Clean projector filters", 90, None, 97, "All three projectors"),
+                                        ("Replace projector lamps", None, 3000, 30, "Order lamps 2 weeks ahead"),
+                                        ("Recalibrate yokes", None, 200, 10, "PFC calibration utility"),
+                                        ("Check seat belts and harness", 180, None, 20, ""),
+                                        ("Clean cockpit and screens", 7, None, 5, "")):
+    repo.save_maintenance_task({"name": name, "every_days": days, "every_hours": hours, "note": note})
+    repo.db.execute("UPDATE maint_tasks SET created=?, last_done=? WHERE name=?",
+                    (time.time() - ago_d * 86400, time.time() - ago_d * 86400, name))
+repo.db.commit()
+w.go("hardware")
+w.refresh_all()
+shot(w, "hardware.png")
+
+inst = tmp / "P3D-install"
+(inst / "Scenery").mkdir(parents=True)
+for n in ("dll.xml", "exe.xml", "scenery.cfg", "Prepar3D.exe", "terrain.dll"):
+    (inst / n).write_text(n * 20)
+rec = repo.start_install("Orbx EHAM Amsterdam", [str(inst)])
+(inst / "dll.xml").write_text("dll.xml + Orbx")
+for k in range(14):
+    (inst / "Scenery" / f"EHAM_{k}.bgl").write_bytes(b"x" * (2000 + k))
+repo.finish_install(rec["id"], create_version=False)
+rec = repo.start_install("ProSim 3.30 update", [str(inst)])
+(inst / "exe.xml").write_text("exe.xml v3.30")
+repo.finish_install(rec["id"], create_version=False)
+m1 = repo.create_manifest("Prepar3D v5 installation", [str(inst)])
+repo.create_manifest("ProSim737", [str(inst / "Scenery")])
+(inst / "terrain.dll").write_text("patched")
+repo.verify_manifest(m1["id"])
+w.go("installs")
+w.refresh_all()
+shot(w, "installs.png")
+
+shared = tmp / "shared-templates"
+shared.mkdir()
+repo.set("sync_mode", "folder")
+repo.set("sync_folder", str(shared))
+t = repo.save_template({"name": "Prepar3D.cfg — display and LOD", "notes": "LOD 4.5 for all sims",
+                        "content": "[DISPLAY]\nWidth={{width}}\nHeight={{height}}\n[TERRAIN]\nLOD_RADIUS=4.500000\n",
+                        "stages": [["Sim 1"], ["Sim 2", "Sim 3"]]})
+repo.set_template_binding(t["id"], fid["Prepar3D.cfg"].id, {"width": "5760", "height": "1080"})
+(shared / "templates" / f"{t['id']}@Sim_2.json").write_text(json.dumps({"machine": "Sim 2", "rev": 0}))
+t2 = repo.save_template({"name": "ProSim config.xml — IOS and server", "content": "<Config><Server>{{server}}</Server></Config>",
+                         "stages": [["Sim 2"], ["Sim 1", "Sim 3"]]})
+repo.advance_rollout(t2["id"])
+(shared / "templates" / f"{t2['id']}@Sim_2.json").write_text(json.dumps({"machine": "Sim 2", "rev": 1}))
+w.go("templates")
+w.refresh_all()
+end = time.time() + 5
+while time.time() < end and w.tpl_table.rowCount() < 2:
+    app.processEvents()
+    time.sleep(0.05)
+w.tpl_table.selectRow(0)
+shot(w, "templates.png")
+repo.set("sync_mode", "")
+
+# 13. fleet overview: Sim 2 and Sim 3 share their status through a stand-in Google Drive
 sys.path.insert(0, str(ROOT / "tests"))
 from fake_drive import FakeDrive  # noqa: E402
 from simconfigmanager import storage  # noqa: E402
@@ -321,12 +449,15 @@ now = time.time()
 for name, extra in (("Sim 2", {"mismatches": [], "alerts_24h": 0, "rulebook_violations": []}),
                     ("Sim 3", {"mismatches": [{"file": "ProSim config.xml", "group": "Sim 3 – ProSim", "status": "modified"}],
                                "alerts_24h": 2, "rulebook_violations": ["ProSim config.xml: .//Server"],
-                               "pending_proposals": 1, "heartbeat": now - 120,
+                               "pending_proposals": 1, "heartbeat": now - 120, "hardware_missing": ["MCP panel"],
+                               "maintenance_overdue": ["Clean projector filters"],
                                "recent_alerts": [{"ts": now - 3600, "message": "[Rulebook] ProSim config.xml: .//Server = "
                                                   "'192.168.10.99', rulebook requires '192.168.10.20'"}]})):
     st = {"machine": name, "app_version": core.APP_VERSION, "heartbeat": now - 60, "files": 13,
           "version": {"number": 3, "title": "ProSim switched to imperial units", "created_at": now - 86400},
           "pending_proposals": 0, "recent_alerts": [], "last_change": now - 7200,
+          "last_session": {"started": now - 5 * 3600, "avg_fps": 41.2 if name == "Sim 2" else 36.0,
+                           "crashed": name == "Sim 3"},
           "system": {"gpu": DEMO_PROBES["gpu"].replace("566.03", "566.03" if name == "Sim 2" else "560.94")
                      .replace("32.0.15.6603", "32.0.15.6603" if name == "Sim 2" else "32.0.15.6094")}}
     st.update(extra)
@@ -340,7 +471,7 @@ while time.time() < end and w.fleet_table.rowCount() < 3:
 w.fleet_table.selectRow(2)
 shot(w, "fleet.png")
 
-# 13. cloud tab set to Google Drive
+# 14. sharing page set to Google Drive
 w.go("sharing")
 w.sync_mode.setCurrentIndex(w.sync_mode.findData("gdrive"))
 w.drive_folder.setText("https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz")
@@ -361,7 +492,7 @@ for m in ("Sim 1 (this PC) — 13 files", "Sim 2 — 13 files", "Sim 3 — 13 fi
 shot(w, "cloud-drive.png")
 drive.stop()
 
-# 14. remote app: connect window with saved sims, and the setup for a person with full control
+# 15. remote app: connect window with saved sims, and the setup for a person with full control
 os.environ["XDG_CONFIG_HOME"] = str(tmp / "client-config")
 from simconfigmanager import remote  # noqa: E402
 remote.save_connections([{"name": "Sim 1", "url": "192.168.10.11", "key": "x"},

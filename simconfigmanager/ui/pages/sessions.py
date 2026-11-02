@@ -7,7 +7,7 @@ import json
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QInputDialog, QLineEdit, QSpinBox,
+    QAbstractItemView, QComboBox, QHBoxLayout, QDialog, QDialogButtonBox, QFormLayout, QInputDialog, QLineEdit, QSpinBox,
     QSplitter, QTableWidget, QVBoxLayout, QWidget,
 )
 
@@ -77,7 +77,10 @@ class SessionsPage:
         self.live_banner.setTextFormat(Qt.RichText)
         self.live_banner.setWordWrap(True)
         self.bridge_btn = button("Install live-data bridge…", self.install_bridge_dialog)
-        lay.addLayout(button_row(self.live_banner, stretch=False, trailing=[self.bridge_btn]))
+        top_row = QHBoxLayout()
+        top_row.addWidget(self.live_banner, 1)
+        top_row.addWidget(self.bridge_btn, 0, Qt.AlignTop)
+        lay.addLayout(top_row)
 
         split = QSplitter(Qt.Vertical)
         top = QWidget()

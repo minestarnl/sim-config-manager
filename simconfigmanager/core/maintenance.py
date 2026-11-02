@@ -78,7 +78,7 @@ _ERST = ("Fan", "Lamp", "Temperature", "Cover open", "Filter", "Other")
 
 
 def describe_projector(raw: dict, lamp_life: int = 0) -> dict:
-    d = {"power": POWER.get(raw.get("POWR") or "", raw.get("POWR")), "name": raw.get("NAME") or "",
+    d = {"power": POWER.get(raw.get("POWR") or "", raw.get("POWR")), "projector_name": raw.get("NAME") or "",
          "model": " ".join(x for x in (raw.get("INF1"), raw.get("INF2")) if x), "lamp_hours": None, "errors": []}
     lamp = (raw.get("LAMP") or "").split()
     if lamp and lamp[0].isdigit():

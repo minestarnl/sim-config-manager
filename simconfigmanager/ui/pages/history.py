@@ -18,7 +18,7 @@ from ...core import (APP_TITLE, fmt_ts, unified_diff)
 
 
 from ..dialogs import DiffDialog, ExportArchiveDialog, ImportArchiveDialog
-from ..common import (SNAPSHOT_KIND, button_row, confirm, fail, hint, inform, item, open_in_explorer,
+from ..common import (SNAPSHOT_KIND, button, button_row, confirm, fail, hint, inform, item, open_in_explorer,
                       running_warning, selected_data, setup_table, warn)
 
 from . import Page
@@ -32,13 +32,18 @@ class HistoryPage:
     def build_history_page(self):
         w = QWidget()
         lay = QVBoxLayout(w)
+        export = button("Export", icon="export")
+        m = QMenu(export)
+        m.addAction("Certification archive (zip)…", lambda: self.export_archive())
+        m.addAction("Configuration manual (PDF, Markdown, HTML)…", self.export_manual)
+        m.addAction("Changelog (Markdown, CSV)…", self.export_changelog)
+        m.addSeparator()
+        m.addAction("Import certification archive…", self.import_archive)
+        export.setMenu(m)
         lay.addLayout(button_row(("Restore all files to this snapshot…", self.restore_snapshot),
                                  ("Save as restore point…", self.snapshot_to_rp),
                                  ("Compare with the files on disk", self.compare_selected_snapshot),
-                                 trailing=[("Export certification archive…", lambda: self.export_archive(), {"icon": "zip"}),
-                                           ("Import certification archive…", self.import_archive),
-                                           ("Export changelog…", self.export_changelog),
-                                           ("Configuration manual…", self.export_manual, {"icon": "book"})]))
+                                 trailing=[export]))
         split = QSplitter(Qt.Vertical)
         self.snap_table = QTableWidget()
         setup_table(self.snap_table, ["#", "When", "Kind", "PC", "Files changed", "Note"], 5)

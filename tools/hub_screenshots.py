@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "docs" / "screenshots"
+OUT = Path(os.environ.get("SCM_SHOTS_OUT") or ROOT / "docs" / "screenshots")
 
 
 def free_port():
@@ -51,7 +51,46 @@ FILES = [("Prepar3D.cfg", "P3D v5"), ("dll.xml", "P3D v5"), ("exe.xml", "P3D v5"
          ("Graphics cards & driver", "System"), ("Windows version", "System"), ("Displays / projectors", "System")]
 
 
-def report(name, version, differ=(), violations=(), alerts=(), pending=0, drv="32.0.15.6603", smi="566.03"):
+def ops(name, missing=(), overdue=False, crashed=False):
+    now = time.time()
+    hw = [("Captain yoke", "PFC Cirrus II Yoke"), ("First officer yoke", "PFC Yoke"), ("MCP panel", "CPflight MCP737"),
+          ("Rudder pedals", "Saitek Pro Flight Rudder")]
+    tasks = [{"id": 1, "name": "Clean projector filters", "every_days": 90, "last_done": now - (97 if overdue else 30) * 86400,
+              "due_date": now + (-7 if overdue else 60) * 86400, "due_in_days": -7 if overdue else 60,
+              "state": "overdue" if overdue else "ok", "note": "All three projectors"},
+             {"id": 2, "name": "Recalibrate yokes", "every_hours": 200, "last_done": now - 12 * 86400, "due_in_hours": 6,
+              "state": "soon", "note": ""},
+             {"id": 3, "name": "Clean cockpit and screens", "every_days": 7, "last_done": now - 2 * 86400,
+              "due_date": now + 5 * 86400, "due_in_days": 5, "state": "soon", "note": ""}]
+    sess = [{"id": 10 - i, "kind": "session", "label": "", "started": now - (i * 0.8 + 0.3) * 86400,
+             "ended": now - (i * 0.8 + 0.3) * 86400 + 6000, "version_number": 3 if i < 3 else 2, "version_matches": 1,
+             "aircraft": "PMDG 737-800 KLM", "stats": {"minutes": 100 + i * 9, "avg_fps": round(41.5 - i * 0.7, 1)},
+             "crash": {"crashes": [{"module": "terrain.dll"}]} if crashed and i == 0 else None} for i in range(5)]
+    return {
+        "hardware": [{"label": l, "ok": l not in missing, "device": d, "note": ""} for l, d in hw],
+        "hardware_missing": list(missing),
+        "maintenance": tasks, "maintenance_overdue": ["Clean projector filters"] if overdue else [],
+        "maintenance_soon": ["Recalibrate yokes", "Clean cockpit and screens"], "sim_hours": 1284.5,
+        "health": {"warnings": ["Projector Left: lamp at 2950 h (98% of its life)"] if overdue else [],
+                   "gpu": {"name": "NVIDIA GeForce RTX 4080", "temp": 67, "util": 92},
+                   "disks": [{"name": "Samsung SSD 990 PRO 2TB", "health": "Healthy", "temp": 41, "wear": 3}],
+                   "projectors": [{"name": n, "power": "On", "lamp_hours": h, "lamp_pct": round(h / 30), "errors": []}
+                                  for n, h in (("Left", 2950 if overdue else 1240), ("Centre", 1210), ("Right", 1180))]},
+        "sessions": sess, "last_session": {"started": sess[0]["started"], "avg_fps": sess[0]["stats"]["avg_fps"],
+                                           "crashed": crashed},
+        "performance": [{"version": 3, "label": "v3", "sessions": 14, "hours": 26.5, "avg_fps": 41.3, "low1_fps": 25.6,
+                         "crashes_per_10h": 0.0}, {"version": 2, "label": "v2", "sessions": 22, "hours": 41.0,
+                                                    "avg_fps": 41.5, "low1_fps": 25.7, "crashes_per_10h": 0.24},
+                        {"version": 1, "label": "v1", "sessions": 9, "hours": 15.2, "avg_fps": 33.5, "low1_fps": 20.8,
+                         "crashes_per_10h": 1.3}],
+        "manifests": [{"name": "Prepar3D v5 installation", "created": now - 20 * 86400, "files": 48211,
+                       "last_check": {"ts": now - 3600, "ok": True, "counts": {"added": 0, "changed": 0, "removed": 0}}}],
+        "installs": [{"name": "Orbx EHAM Amsterdam", "started": now - 9 * 86400, "status": "done",
+                      "counts": {"added": 1432, "changed": 3, "removed": 0}}],
+    }
+
+
+def report(name, version, differ=(), violations=(), alerts=(), pending=0, drv="32.0.15.6603", smi="566.03", **kw):
     now = time.time()
     st = {f: "match" for f, _ in FILES}
     for f, s in differ:
@@ -66,7 +105,7 @@ def report(name, version, differ=(), violations=(), alerts=(), pending=0, drv="3
            "note": "4.5 = smooth on the projectors"}]
     texts = {"match": "Matches", "modified": "Changed", "missing": "Missing on disk", "new": "Not in version"}
     return {
-        "machine": name, "app_version": "1.11.0", "heartbeat": now, "files": len(FILES),
+        "machine": name, "app_version": "1.12.0", "heartbeat": now, "files": len(FILES),
         "version": {"number": version[0], "title": version[1], "created_at": now - 86400 * 2},
         "mismatches": [{"file": f, "group": dict(FILES)[f], "status": s} for f, s in differ],
         "alerts_24h": len(alerts), "recent_alerts": [{"ts": now - 600 * (i + 1), "message": a} for i, a in enumerate(alerts)],
@@ -78,6 +117,7 @@ def report(name, version, differ=(), violations=(), alerts=(), pending=0, drv="3
                      for n, t in [(version[0], version[1]), (2, "Lower LOD radius for smoother frame rates"),
                                   (1, "Initial certified setup")] if n <= version[0]],
         "host": {"hostname": name.replace(" ", "").upper() + "-PC", "os": "Windows-11-10.0.22631-SP0", "admin": True},
+        **ops(name, **kw),
     }
 
 
@@ -113,6 +153,7 @@ def main():
     call("/api/v1/report", report("Sim 1", v3), "POST", keys["Sim 1"])
     call("/api/v1/report", report("Sim 1", v4), "POST", keys["Sim 1"])
     call("/api/v1/report", report("Sim 2", v3, differ=[("Prepar3D.cfg", "modified"), ("dll.xml", "modified")],
+                                  missing=["Rudder pedals"], overdue=True, crashed=True,
                                   violations=["Prepar3D.cfg: GRAPHICS/TEXTURE_MAX_LOAD"],
                                   alerts=["[Rulebook] Prepar3D.cfg: GRAPHICS/TEXTURE_MAX_LOAD = '2048', rulebook requires '4096'",
                                           "[FSUIPC must stay loaded] dll.xml: line removed: <Name>FSUIPC 6</Name>"],
@@ -177,12 +218,27 @@ def main():
             pg.wait_for_selector("td")
             pg.wait_for_timeout(500)
             pg.screenshot(path=str(OUT / "hub-events.png"))
+            pg.goto(base + "/#/maintenance")
+            pg.wait_for_selector("td")
+            pg.wait_for_timeout(500)
+            pg.screenshot(path=str(OUT / "hub-maintenance.png"))
+            pg.goto(base + "/#/qr")
+            pg.wait_for_selector("img.qr")
+            pg.wait_for_timeout(300)
+            pg.screenshot(path=str(OUT / "hub-qr.png"))
             m = b.new_page(viewport={"width": 390, "height": 844}, device_scale_factor=2, color_scheme="dark")
             m.context.add_cookies(pg.context.cookies())
             m.goto(base + "/#/fleet")
             m.wait_for_selector(".card")
             m.wait_for_timeout(500)
             m.screenshot(path=str(OUT / "hub-phone.png"))
+            m.goto(base + f"/#/m/{sims['Sim 2']}")
+            m.wait_for_selector(".phone")
+            m.wait_for_timeout(300)
+            m.click("text=Why is it NO-GO?")
+            m.wait_for_selector(".explain div")
+            m.wait_for_timeout(300)
+            m.screenshot(path=str(OUT / "hub-phone-sim.png"))
             b.close()
     finally:
         proc.terminate()

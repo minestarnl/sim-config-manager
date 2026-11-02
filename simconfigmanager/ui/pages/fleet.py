@@ -37,8 +37,8 @@ class FleetPage:
         split = QSplitter(Qt.Vertical)
         self.fleet_table = QTableWidget()
         setup_table(self.fleet_table, ["Sim", "Online", "Version", "Files that differ", "Rulebook",
-                                       "Alerts (24 h)", "Proposed changes", "Last change", "GPU driver",
-                                       "App version"], 8)
+                                       "Hardware & health", "Last session", "Alerts (24 h)", "Proposed changes",
+                                       "GPU driver"], 2)
         self.fleet_table.itemSelectionChanged.connect(self.show_fleet_detail)
         split.addWidget(self.fleet_table)
         self.fleet_detail = QTextEdit()
@@ -79,7 +79,10 @@ class FleetPage:
             online = me or age < 900
             mism = st.get("mismatches", [])
             viol = st.get("rulebook_violations", [])
-            ok = online and not mism and not viol
+            hw = st.get("hardware_missing") or []
+            care = (st.get("maintenance_overdue") or []) + (st.get("health_warnings") or []) + \
+                (st.get("integrity_problems") or [])
+            ok = online and not mism and not viol and not hw
             problems += 0 if ok else 1
             ver = st.get("version")
             gpu = (st.get("system", {}).get("gpu", "") or "").split("\n")
@@ -95,11 +98,16 @@ class FleetPage:
                                                OK))
             self.fleet_table.setItem(i, 4, item(f"✖ {len(viol)} broken" if viol else "✔ OK", color=BAD if viol else
                                                OK))
-            self.fleet_table.setItem(i, 5, item(st.get("alerts_24h", 0)))
-            self.fleet_table.setItem(i, 6, item(st.get("pending_proposals", 0) or ""))
-            self.fleet_table.setItem(i, 7, item(fmt_ts(st["last_change"]) if st.get("last_change") else "–"))
-            self.fleet_table.setItem(i, 8, item(drv))
-            self.fleet_table.setItem(i, 9, item(st.get("app_version", "")))
+            hh = ("✖ Missing: " + ", ".join(hw)) if hw else (f"⚠ {len(care)} to check" if care else "✔ OK")
+            self.fleet_table.setItem(i, 5, item(hh, color=BAD if hw else (WARN if care else OK)))
+            self.fleet_table.setItem(i, 7, item(st.get("alerts_24h", 0)))
+            self.fleet_table.setItem(i, 8, item(st.get("pending_proposals", 0) or ""))
+            ls = st.get("last_session")
+            self.fleet_table.setItem(i, 6, item((fmt_ts(ls["started"])[5:16] + (f" · {ls['avg_fps']} fps" if ls.get("avg_fps")
+                                                                          else "") + (" · crashed" if ls.get("crashed")
+                                                                                      else "")) if ls else "–",
+                                               color=BAD if ls and ls.get("crashed") else None))
+            self.fleet_table.setItem(i, 9, item(drv))
         n = len(rows)
         if not self.fleet_banner.text().endswith("loading the other sims…") or n > 1:
             self.fleet_banner.setText(
@@ -122,6 +130,12 @@ class FleetPage:
         if st.get("rulebook_violations"):
             parts.append(f"<b style='color:{BAD}'>Rulebook broken:</b><ul>" + "".join(
                 f"<li>{html.escape(v)}</li>" for v in st["rulebook_violations"]) + "</ul>")
+        for key, title in (("hardware_missing", "Cockpit hardware missing"), ("maintenance_overdue",
+                                                                           "Maintenance overdue"),
+                           ("health_warnings", "Health warnings"), ("integrity_problems", "Integrity differences")):
+            if st.get(key):
+                parts.append(f"<b style='color:{BAD if key == 'hardware_missing' else WARN}'>{title}:</b><ul>" + "".join(
+                    f"<li>{html.escape(str(v))}</li>" for v in st[key]) + "</ul>")
         if st.get("recent_alerts"):
             parts.append("<b>Recent alerts:</b><ul>" + "".join(
                 f"<li>{fmt_ts(a['ts'])} — {html.escape(a['message'])}</li>" for a in st["recent_alerts"]) + "</ul>")

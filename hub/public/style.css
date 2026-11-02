@@ -126,6 +126,7 @@ img.photo { max-width: 220px; max-height: 160px; border-radius: 4px; margin-top:
 button.wide, .btn.wide { width: 100%; padding: 10px; margin: 6px 0; text-align: center; display: block; font-size: 15px; }
 .phone { max-width: 520px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
 .phone .tile { text-align: center; }
+.phone .tile ul { text-align: left; display: inline-block; margin: 8px 0 0; }
 .phone textarea { min-height: 90px; font-size: 15px; }
 .tile.ok { border-color: var(--green); } .tile.bad { border-color: var(--red); } .tile.off { border-color: var(--faint); }
 .stickers { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 16px; }
