@@ -12,12 +12,21 @@ recorded, you can see exactly what changed, and you can put everything back with
 | **Quick restore** — one button per saved setup ![](docs/screenshots/quick-restore.png) | **Files** — every tracked file with its full history ![](docs/screenshots/files.png) |
 | **Editor** — syntax highlighting, find & replace ![](docs/screenshots/editor-cfg.png) | **Live syntax check** — broken XML marked before you save ![](docs/screenshots/editor-xml-check.png) |
 | **Alerts** — notifications and auto-undo for specific changes ![](docs/screenshots/alerts.png) | **Create version** — release notes pre-filled with what changed ![](docs/screenshots/create-version.png) |
+| **Fleet** — every sim at a glance, via Google Drive or a shared folder ![](docs/screenshots/fleet.png) | **Rulebook** — documented and locked settings with live compliance ![](docs/screenshots/rulebook.png) |
+| **Setting-level changes** — and one click to ignore values the sim rewrites itself ![](docs/screenshots/diff-settings.png) | **Google Drive, direct** — no Drive app needed on the sims ![](docs/screenshots/cloud-drive.png) |
 | **Differences** — exactly what changed, line by line ![](docs/screenshots/diff.png) | **Claude** — reads your configs, proposes changes you approve ![](docs/screenshots/claude-proposal.png) |
 
 ## Download
 
-Get **SimConfigManager.exe** (and **SimConfigManager-MCP.exe** for the Claude connector) from the
-[latest release](../../releases/latest) — no Python needed. Keep both exes in the same folder.
+Get **SimConfigManager-Setup-x.y.z.exe** from the [latest release](../../releases/latest) and run it on each
+sim. It installs both programs (the app and the Claude/ChatGPT connector) in *Program Files*, adds a Start-menu
+entry, and can be uninstalled normally (your data in `C:\ProgramData\SimConfigManager` is kept). The loose
+`.exe` files are in the release too, if you prefer copying them by hand.
+
+**Updates:** *Settings → Check for updates* (or the daily check) downloads the newest installer, verifies it
+against `SHA256SUMS.txt`, installs it silently and restarts the app. While this GitHub repository is private,
+paste a read-only GitHub token in *Settings → GitHub access token* (fine-grained token, this repository only,
+*Contents: read*), or make the repository public.
 Every push to `main` is also built automatically: *Actions* tab → latest run → *Artifacts*.
 
 To publish a new release, raise `APP_VERSION` in `simconfigmanager/core.py` and push to `main` — the build
@@ -51,6 +60,12 @@ publishes `v<version>` automatically (existing releases are never overwritten).
 | Feature | Where |
 |---|---|
 | **Versions**: number the whole configuration (v1, v2, …) and see at a glance what differs | Versions |
+| **Fleet overview**: all sims' status (version match, rulebook, alerts, driver, online) | Fleet |
+| **Rulebook**: notes per setting, *required values* lock settings (alerts, editor warning, Claude won't change them) | Rulebook |
+| **Ignored settings**: values the sim rewrites by itself don't count as changes; per-setting change summaries | Alerts, any diff window |
+| **System information** tracked like files: GPU & driver, Windows build, sim software versions, displays, hardware, network, own commands | Files → Track system info |
+| **Google Drive direct** (service account on a Shared Drive, or a Google account) — or any shared folder | Cloud / other sims |
+| Installer, in-app updates | Settings |
 | Watches tracked files (every 5 s by default) and records a snapshot whenever one changes | automatic |
 | Full history per file, with coloured line-by-line diffs | Files, History |
 | Restore one file to any older version | Files → Restore this version |
@@ -104,6 +119,64 @@ configuration version and whether the files match it. Versions are included in c
 
 Restore points vs versions: **restore points** are named presets you switch between (e.g. "Checkride");
 **versions** are the numbered, official history of the configuration.
+
+## Google Drive (direct)
+
+The sims can talk to Google Drive themselves — no Google Drive app on the PCs. **Cloud / other sims → Use:
+Google Drive — direct**. Two ways to sign in:
+
+**A. Service account on a Shared Drive (recommended).** No browser login, never expires — ideal for sims.
+Needs Google Workspace (Shared Drives).
+1. [console.cloud.google.com](https://console.cloud.google.com): create a project → *APIs & Services → Enable
+   APIs* → **Google Drive API**.
+2. *IAM & Admin → Service accounts* → create one (no roles needed) → *Keys → Add key → JSON* → download.
+3. In Google Drive, open the Shared Drive → *Manage members* → add the service account's e-mail address
+   (shown in the app) as **Content manager**. Make a folder for the sims, e.g. *Sim configs*.
+4. In the app: *Sign in with: Service account* → **Choose key file** → paste the folder's link → **Save & test**.
+   Do the same on every sim (same key file, same folder link).
+
+**B. A dedicated Google account** (works with a normal Gmail account).
+1. Google Cloud project with the **Google Drive API** enabled (as above).
+2. *OAuth consent screen*: user type *External*, add the account as a test user, then **Publish app**
+   (otherwise Google expires the sign-in after 7 days; the app only uses the non-sensitive `drive.file` scope).
+3. *Credentials → Create OAuth client ID → Desktop app* → download the JSON.
+4. In the app: *Sign in with: Google account* → **Choose OAuth client file** → **Sign in…**, and sign in with
+   the sims' account. The app keeps its files in a *SimConfigManager* folder in that account's Drive and can
+   only see files it created itself. Repeat on each sim with the same account.
+
+What goes to Drive: each sim's history and versions (`machines/`), file versions (`objects/`), the fleet
+status (`status/`, every 5 minutes) and — when ticked during export — certification archives (`archives/`).
+*Files → Import archive* can import straight from there. A plain shared folder still works the same way.
+
+## Fleet overview
+
+The **Fleet** tab shows every sim that shares through the same Drive/folder: online, which configuration version
+it runs and whether its files match, rulebook problems, alerts in the last 24 h, changes waiting for approval,
+last change and graphics driver. Click a sim for details.
+
+## Rulebook
+
+Document *why* settings have their value (**Rulebook → Add**: pick the file and the setting — the list shows the
+settings in the file — and the current value). Give a **required value** to lock it:
+* an alert when it changes, the editor warns before saving, the Fleet tab flags it;
+* Claude/ChatGPT read the rulebook and can't propose changing a locked value.
+
+Entries without a required value are plain documentation that Claude takes into account.
+
+## Ignored settings
+
+Prepar3D rewrites some values whenever it closes (e.g. window positions). Open any difference window, select
+the setting in **Setting changes** and click **Ignore the selected setting** — or add rules under **Alerts →
+Ignored settings** (CFG key or section with wildcards, XML element, or regex). Changes that touch *only* ignored
+settings no longer count as changes, alerts or version mismatches; the full file is still stored.
+
+## System information
+
+**Files → Track system info…** adds read-only "files" that are read from the PC every 15 minutes (Settings):
+graphics card & driver, Windows version/build, sim software versions (Prepar3D, ProSim, FSUIPC, add-ons …),
+all installed software, displays/projectors, CPU/RAM/motherboard/disks and network addresses — plus your own
+PowerShell commands. They get history, versions, alerts ("driver changed"), archives and Claude access like any
+file, but are never written back.
 
 ## Claude: troubleshoot and dial in settings
 
@@ -220,6 +293,13 @@ change it). Options: write the files, keep monitoring them, and — on a fresh i
 history, restore points and rules. A safety snapshot is taken first.
 
 Restore points can also be exported this way (right-click a restore point → Export).
+
+## Code signing (optional)
+
+Windows shows "unknown publisher" for unsigned programs. To remove that, the build can sign the installer and
+programs. The most affordable route is Microsoft's Azure Trusted Signing service (monthly fee, needs a
+registered business and a short identity check); a classic code-signing certificate also works. Once you have
+an account, signing can be added to the GitHub build.
 
 ## Development
 

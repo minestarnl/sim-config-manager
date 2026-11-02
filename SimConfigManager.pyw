@@ -16,7 +16,23 @@ def main():
     ap.add_argument("--minimized", action="store_true", help="start hidden in the tray (used at boot)")
     ap.add_argument("--data", default=None, help="data folder (default C:\\ProgramData\\SimConfigManager)")
     ap.add_argument("--no-elevate", action="store_true", help="do not ask for administrator rights")
+    ap.add_argument("--uninstall-cleanup", action="store_true", help=argparse.SUPPRESS)
     args, _ = ap.parse_known_args()
+
+    if args.uninstall_cleanup:   # called by the uninstaller (already elevated)
+        try:
+            core.set_autostart(False)
+            from simconfigmanager import net
+            data = Path(args.data) if args.data else default_data_dir()
+            try:
+                repo = Repo(data, read_only=True)
+                net.set_firewall_rule(int(repo.get("net_port") or net.DEFAULT_PORT), False)
+            except Exception:  # noqa: BLE001
+                net.set_firewall_rule(net.DEFAULT_PORT, False)
+            core.connect_claude_desktop(data, False)
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
 
     # Files under Program Files / ProgramData can only be restored with admin rights, so ask for them.
     # (The built .exe already carries an 'requireAdministrator' manifest; this covers running from source.)
@@ -56,6 +72,14 @@ def main():
     if sys.platform == "win32" and core.is_admin() and repo.get("proposals_acl_v15") != "1":
         core.allow_users_to_propose(repo.data_dir)
         repo.set("proposals_acl_v15", "1")
+
+    if sys.platform == "win32" and core.is_admin():
+        try:
+            fixed = core.repair_paths_after_move(repo.data_dir)
+            if fixed:
+                repo.log("Updated after moving the program: " + ", ".join(fixed))
+        except Exception:  # noqa: BLE001
+            pass
 
     start_hidden = args.minimized and repo.get("start_minimized") == "1"
     win = MainWindow(repo, start_hidden=start_hidden)

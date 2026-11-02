@@ -5,9 +5,11 @@
 Builds a throw-away store with P3D / ProSim-style files, simulates a day of changes, and saves PNGs to
 docs/screenshots/. Real temp paths are shown as the Windows paths they stand for.
 """
+import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -173,6 +175,32 @@ def shot(widget, name):
     print("saved", name)
 
 
+# demo system information (real values come from PowerShell on Windows)
+DEMO_PROBES = {
+    "gpu": "NVIDIA GeForce RTX 4080\n  Driver version : 32.0.15.6603\n  Driver date    : 2024-10-04\n"
+           "  Video processor: NVIDIA GeForce RTX 4080\n\nnvidia-smi:\nNVIDIA GeForce RTX 4080, 566.03, 95.03.1C.00.95, 4\n",
+    "windows": "Microsoft Windows 11 Pro\nVersion 23H2  build 22631.4317\nEdition Professional\nArchitecture 64-bit\n",
+    "displays": "\\\\.\\DISPLAY1  3840x2160 at 0,0  (primary)\n\\\\.\\DISPLAY2  1920x1080 at 3840,0\n"
+                "\\\\.\\DISPLAY3  1920x1080 at 5760,0\nMonitor: SAM Odyssey G7\nMonitor: EPS Projector\n",
+}
+repo.background_probes = True
+repo._probe_cache = {}
+for key, text in DEMO_PROBES.items():
+    repo._probe_cache[core.PROBE_PREFIX + key] = (time.time() + 10 ** 6, text.encode())
+    repo.add_file(core.PROBE_PREFIX + key, core.BUILTIN_PROBES[key][0], "Sim 1 – System")
+repo.ensure_baseline()
+repo.add_ignore(fid["Prepar3D.cfg"].id, "ini_section", "window.*", "P3D rewrites window positions on exit")
+repo.save_rulebook_entry({"file_id": fid["Prepar3D.cfg"].id, "selector": "GRAPHICS/TEXTURE_MAX_LOAD",
+                          "required": "4096", "note": "Certified value — lower causes blurry ground textures",
+                          "author": "Sim Tech"})
+repo.save_rulebook_entry({"file_id": fid["ProSim config.xml"].id, "selector": ".//Server", "required": "192.168.10.20",
+                          "note": "ProSim server PC (fixed IP)", "author": "Sim Tech"})
+repo.save_rulebook_entry({"file_id": fid["dll.xml"].id, "selector": ".//Launch.Addon[1]/Disabled", "required": "False",
+                          "note": "FSUIPC must load — ProSim needs it", "author": "Sim Tech"})
+repo.save_rulebook_entry({"file_id": fid["Prepar3D.cfg"].id, "selector": "TERRAIN/LOD_RADIUS", "required": "",
+                          "note": "4.5 = smooth on the projectors, 6.5 = sharper but stutters on approach",
+                          "author": "Sim Tech"})
+
 w = gui.MainWindow(repo, start_hidden=True)
 w.resize(1280, 760)
 w.show()
@@ -258,4 +286,66 @@ nd = gui.NetSetupDialog("Sim 1", demo_key, ["http://192.168.10.11:8765/mcp", "ht
                         "chatgpt", w)
 nd.resize(860, 680)
 shot(nd, "chatgpt-setup.png")
+
+# 10. setting-level diff with "ignore" button
+old = repo.get_object(repo.entries(repo.latest_version().snapshot_id)[fid["Prepar3D.cfg"].id])
+new = path["Prepar3D.cfg"].read_bytes()
+sd = gui.DiffDialog("Prepar3D.cfg: v3 → now", core.unified_diff(old, new, "v3", "on disk now"), w,
+                    summary=core.setting_changes(old, new, str(path["Prepar3D.cfg"])), ignore_cb=lambda c: None)
+sd.resize(900, 560)
+shot(sd, "diff-settings.png")
+
+# 11. rulebook
+w.tabs.setCurrentWidget(w.tab_rulebook)
+w.refresh_all()
+shot(w, "rulebook.png")
+
+# 12. fleet overview: Sim 2 and Sim 3 share their status through a stand-in Google Drive
+sys.path.insert(0, str(ROOT / "tests"))
+from fake_drive import FakeDrive  # noqa: E402
+from simconfigmanager import storage  # noqa: E402
+drive = FakeDrive().start()
+os.environ["SCM_DRIVE_API"] = drive.url
+storage.service_account_token_provider = lambda f: (lambda: "test-token")
+core.drive_files(repo)["service_account"].write_text(json.dumps({"type": "service_account",
+                                                                 "client_email": "sim-config@simcenter.iam.gserviceaccount.com"}))
+repo.set("sync_mode", "gdrive")
+repo.set("gdrive_auth", "service_account")
+repo.set("gdrive_folder_id", "shared123")
+be = storage.DriveBackend(lambda: "test-token", "shared123", api_base=drive.url)
+now = time.time()
+for name, extra in (("Sim 2", {"mismatches": [], "alerts_24h": 0, "rulebook_violations": []}),
+                    ("Sim 3", {"mismatches": [{"file": "ProSim config.xml", "group": "Sim 3 – ProSim", "status": "modified"}],
+                               "alerts_24h": 2, "rulebook_violations": ["ProSim config.xml: .//Server"],
+                               "pending_proposals": 1, "heartbeat": now - 120,
+                               "recent_alerts": [{"ts": now - 3600, "message": "[Rulebook] ProSim config.xml: .//Server = "
+                                                  "'192.168.10.99', rulebook requires '192.168.10.20'"}]})):
+    st = {"machine": name, "app_version": core.APP_VERSION, "heartbeat": now - 60, "files": 13,
+          "version": {"number": 3, "title": "ProSim switched to imperial units", "created_at": now - 86400},
+          "pending_proposals": 0, "recent_alerts": [], "last_change": now - 7200,
+          "system": {"gpu": DEMO_PROBES["gpu"].replace("566.03", "566.03" if name == "Sim 2" else "560.94")
+                     .replace("32.0.15.6603", "32.0.15.6603" if name == "Sim 2" else "32.0.15.6094")}}
+    st.update(extra)
+    be.write(f"status/{name.replace(' ', '_')}.json", json.dumps(st).encode())
+w.tabs.setCurrentWidget(w.tab_fleet)
+w.refresh_fleet()
+end = time.time() + 10
+while time.time() < end and w.fleet_table.rowCount() < 3:
+    app.processEvents()
+    time.sleep(0.05)
+w.fleet_table.selectRow(2)
+shot(w, "fleet.png")
+
+# 13. cloud tab set to Google Drive
+w.tabs.setCurrentWidget(w.tab_sync)
+w.sync_mode.setCurrentIndex(w.sync_mode.findData("gdrive"))
+w.drive_folder.setText("https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz")
+w.update_sync_widgets()
+w.sync_status.setText("<span style='color:#2e7d32'>✔ Connected to Google Drive folder <b>Sim configs</b>.</span> "
+                      "Last upload: 2026-11-02 09:12:40")
+w.machine_combo.clear()
+for m in ("Sim 1 (this PC) — 13 files", "Sim 2 — 13 files", "Sim 3 — 13 files"):
+    w.machine_combo.addItem(m)
+shot(w, "cloud-drive.png")
+drive.stop()
 print("done →", OUT)

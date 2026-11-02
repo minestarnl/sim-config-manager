@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import threading
 import json
 import os
 import subprocess
@@ -20,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import core, net
-from .core import (APP_NAME, APP_VERSION, FolderSync, Repo, Rule, RULE_HELP, RULE_KINDS, fmt_ts,
+from .core import (APP_NAME, APP_VERSION, Repo, Rule, RULE_HELP, RULE_KINDS, fmt_ts,
                    unified_diff)
 
 STATUS_COLORS = {"OK": "#2e7d32", "Changed": "#e65100", "Missing": "#c62828", "New": "#1565c0"}
@@ -95,11 +96,32 @@ def open_in_explorer(path: str):
 # --------------------------------------------------------------------------- dialogs
 
 class DiffDialog(QDialog):
-    def __init__(self, title: str, diff_text: str, parent=None):
+    def __init__(self, title: str, diff_text: str, parent=None, summary: Optional[list] = None, ignore_cb=None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(1000, 650)
+        self.resize(1000, 680)
         lay = QVBoxLayout(self)
+        if summary:
+            lay.addWidget(QLabel(f"<b>Setting changes ({len(summary)})</b>"))
+            self.sum_list = QListWidget()
+            self.sum_list.setMaximumHeight(170)
+            colors = {"added": "#1b5e20", "removed": "#b71c1c", "changed": "#e65100"}
+            for c in summary:
+                it = QListWidgetItem(core.describe_change(c))
+                it.setData(Qt.UserRole, c)
+                it.setForeground(QBrush(QColor(colors.get(c["kind"], "#000"))))
+                self.sum_list.addItem(it)
+            lay.addWidget(self.sum_list)
+            if ignore_cb:
+                row = QHBoxLayout()
+                b = QPushButton("Ignore the selected setting from now on…")
+                b.setToolTip("For values the sim rewrites by itself (e.g. window positions): changes to them will no "
+                             "longer count as changes or trigger alerts.")
+                b.clicked.connect(lambda: [ignore_cb(it.data(Qt.UserRole)) for it in self.sum_list.selectedItems()[:1]])
+                row.addWidget(b)
+                row.addStretch()
+                lay.addLayout(row)
+            lay.addWidget(QLabel("<b>Line by line</b>"))
         view = QTextEdit()
         view.setReadOnly(True)
         view.setFont(QFont("Consolas", 10))
@@ -269,6 +291,11 @@ class ExportArchiveDialog(QDialog):
                               "(lets you rebuild everything on another PC)")
         self.hist.setChecked(True)
         form.addRow("", self.hist)
+        self.upload = QCheckBox("Also upload to the shared location (Google Drive / sync folder) → archives")
+        has_sync = (repo.get("sync_mode") or ("folder" if repo.get("sync_folder") else "")) not in ("", "off")
+        self.upload.setEnabled(has_sync)
+        self.upload.setChecked(has_sync and repo.get("archive_upload") != "0")
+        form.addRow("", self.upload)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -424,6 +451,95 @@ class CreateVersionDialog(QDialog):
 
     def values(self):
         return self.title.text().strip(), self.notes.toPlainText().strip(), self.by.text().strip()
+
+
+class RulebookDialog(QDialog):
+    def __init__(self, repo: Repo, entry: Optional[dict] = None, parent=None):
+        super().__init__(parent)
+        self.repo = repo
+        self.entry = dict(entry or {})
+        self.setWindowTitle("Rulebook entry")
+        self.resize(640, 360)
+        form = QFormLayout(self)
+        self.file = QComboBox()
+        self.file.addItem("(general note — no file)", None)
+        for f in repo.files():
+            if not core.is_probe(f):
+                self.file.addItem(f"{f.display}  [{f.group}]", f.id)
+        self.file.setCurrentIndex(max(0, self.file.findData(self.entry.get("file_id"))))
+        self.setting = QComboBox()
+        self.setting.setEditable(True)
+        self.file.currentIndexChanged.connect(self.fill_settings)
+        self.current = QLabel()
+        self.current.setStyleSheet("color:#555")
+        self.setting.currentTextChanged.connect(self.show_current)
+        self.required = QLineEdit(self.entry.get("required", ""))
+        self.required.setPlaceholderText("leave empty for a note only")
+        self.note = QTextEdit()
+        self.note.setAcceptRichText(False)
+        self.note.setPlainText(self.entry.get("note", ""))
+        self.note.setMaximumHeight(90)
+        self.author = QLineEdit(self.entry.get("author") or repo.get("version_author") or os.environ.get("USERNAME", ""))
+        form.addRow("File", self.file)
+        form.addRow("Setting", self.setting)
+        form.addRow("", self.current)
+        form.addRow("Required value", self.required)
+        form.addRow("Note / why", self.note)
+        form.addRow("By", self.author)
+        hint = QLabel("CFG/INI: <i>Section/Key</i> (e.g. GRAPHICS/TEXTURE_MAX_LOAD). XML: element path, "
+                      "optionally @attribute (e.g. .//Server@ip).")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#555")
+        form.addRow("", hint)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.save)
+        bb.rejected.connect(self.reject)
+        form.addRow(bb)
+        self.fill_settings()
+        if self.entry.get("selector"):
+            self.setting.setEditText(self.entry["selector"])
+        self.show_current()
+
+    def fill_settings(self, *_):
+        fid = self.file.currentData()
+        self.setting.blockSignals(True)
+        cur = self.setting.currentText()
+        self.setting.clear()
+        f = self.repo.file(fid) if fid else None
+        if f:
+            vals = core.setting_values(self.repo.read_current(f), f.path) or {}
+            for k in sorted(vals):
+                if core.kind_for_path(f.path) == "xml":
+                    path, _, attr = k.partition("@")
+                    parts = path.split("/")[1:]
+                    sel = (".//" + "/".join(parts) if parts else ".") + (f"@{attr}" if attr else "")
+                else:
+                    sel = k
+                self.setting.addItem(sel)
+        self.setting.setEditText(cur)
+        self.setting.blockSignals(False)
+        self.show_current()
+
+    def show_current(self, *_):
+        fid = self.file.currentData()
+        f = self.repo.file(fid) if fid else None
+        if not f or not self.setting.currentText().strip():
+            self.current.setText("")
+            return
+        v = core.rule_value(self.repo.read_current(f), f.path, self.setting.currentText().strip())
+        self.current.setText(f"Current value: {v!r}" if v is not None else "Not found in the current file.")
+        if v is not None and not self.required.text() and not self.entry.get("id"):
+            self.required.setPlaceholderText(f"e.g. {v}   (leave empty for a note only)")
+
+    def save(self):
+        sel = self.setting.currentText().strip()
+        if not sel:
+            QMessageBox.warning(self, APP_NAME, "Fill in the setting.")
+            return
+        self.entry.update(file_id=self.file.currentData(), selector=sel, required=self.required.text().strip(),
+                          note=self.note.toPlainText().strip(), author=self.author.text().strip())
+        self.repo.save_rulebook_entry(self.entry)
+        self.accept()
 
 
 class NetSetupDialog(QDialog):
@@ -643,11 +759,15 @@ class MainWindow(QMainWindow):
         self.tab_alerts = self.build_alerts_tab()
         self.tab_sync = self.build_sync_tab()
         self.tab_claude = self.build_claude_tab()
+        self.tab_rulebook = self.build_rulebook_tab()
+        self.tab_fleet = self.build_fleet_tab()
         self.tab_settings = self.build_settings_tab()
+        self.tabs.addTab(self.tab_fleet, "Fleet")
         self.tabs.addTab(self.tab_versions, "Versions")
         self.tabs.addTab(self.tab_quick, "Quick restore")
         self.tabs.addTab(self.tab_files, "Files")
         self.tabs.addTab(self.tab_history, "History")
+        self.tabs.addTab(self.tab_rulebook, "Rulebook")
         self.tabs.addTab(self.tab_alerts, "Alerts")
         self.tabs.addTab(self.tab_sync, "Cloud / other sims")
         self.tabs.addTab(self.tab_claude, "Claude")
@@ -664,6 +784,15 @@ class MainWindow(QMainWindow):
         self.sync_timer.timeout.connect(self.auto_push)
         self.sync_timer.start(60_000)
 
+        self.repo.background_probes = True
+        self.probe_timer = QTimer(self)
+        self.probe_timer.timeout.connect(self.refresh_probes_bg)
+        self.probe_timer.start(60_000)
+        QTimer.singleShot(3000, self.refresh_probes_bg)
+        QTimer.singleShot(20_000, self.daily_update_check)
+        self.update_timer = QTimer(self)
+        self.update_timer.timeout.connect(self.daily_update_check)
+        self.update_timer.start(3_600_000)
         self.repo.ensure_baseline()
         self.refresh_all()
         if not start_hidden:
@@ -725,7 +854,12 @@ class MainWindow(QMainWindow):
             if e.isVisible() and not e.close():
                 return
         if self.sync_dirty:
-            self.auto_push()
+            try:  # last upload before quitting (synchronous)
+                s = self.sync()
+                if s is not None:
+                    s.push()
+            except Exception:  # noqa: BLE001
+                pass
         self.stop_network()
         self.tray.hide()
         QApplication.quit()
@@ -771,15 +905,6 @@ class MainWindow(QMainWindow):
         else:
             self.update_version_indicator()
 
-    def auto_push(self):
-        folder = self.repo.get("sync_folder")
-        if not folder or self.repo.get("auto_push") != "1" or not self.sync_dirty:
-            return
-        try:
-            FolderSync(self.repo, folder).push()
-            self.sync_dirty = False
-        except Exception as e:  # noqa: BLE001
-            self.statusBar().showMessage(f"Cloud sync failed: {e}")
 
     # ================================================================= refresh
     def refresh_all(self):
@@ -788,7 +913,8 @@ class MainWindow(QMainWindow):
         fn = {self.tab_versions: self.refresh_versions, self.tab_quick: self.refresh_quick,
               self.tab_files: self.refresh_files, self.tab_history: self.refresh_history,
               self.tab_alerts: self.refresh_alerts, self.tab_sync: self.refresh_sync,
-              self.tab_claude: self.refresh_claude}.get(cur)
+              self.tab_claude: self.refresh_claude, self.tab_rulebook: self.refresh_rulebook,
+              self.tab_fleet: self.refresh_fleet}.get(cur)
         if fn:
             fn()
         self.update_version_indicator()
@@ -974,9 +1100,8 @@ class MainWindow(QMainWindow):
             return
         x = sel[0]
         number = self.ver_combo.currentData()
-        DiffDialog(f"{x.file.display}: v{number} → now",
-                   unified_diff(self.repo.get_object(x.version_hash), self.repo.read_current(x.file),
-                                f"v{number}", "on disk now"), self).exec()
+        self.file_diff(x.file, self.repo.get_object(x.version_hash), self.repo.read_current(x.file),
+                       f"v{number}", "on disk now", f"{x.file.display}: v{number} → now")
 
     def ver_open_editor(self):
         sel = self.selected_vstatus()
@@ -1236,7 +1361,8 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(w)
         bar = QHBoxLayout()
         for text, fn in (("Add files…", self.add_files), ("Add folder…", self.add_folder),
-                         ("Find P3D / ProSim configs…", self.discover), ("✎ Open in editor", self.edit_contents),
+                         ("Find P3D / ProSim configs…", self.discover),
+                         ("Track system info…", self.add_system_info), ("✎ Open in editor", self.edit_contents),
                          ("Rename / group…", self.edit_file),
                          ("Stop tracking", self.remove_files), ("Snapshot now…", self.snapshot_now),
                          ("Export archive (zip)…", self.export_archive), ("Import archive…", self.import_archive)):
@@ -1404,6 +1530,31 @@ class MainWindow(QMainWindow):
             self.sync_dirty = True
             self.refresh_files()
 
+    # ---------------- diffs with setting summaries + ignore (#1)
+    def file_diff(self, f, old, new, la, lb, title):
+        summary = core.setting_changes(old, new, f.path)
+        DiffDialog(title, unified_diff(old, new, la, lb), self, summary=summary,
+                   ignore_cb=(lambda c, ff=f: self.ignore_setting(ff, c)) if summary else None).exec()
+
+    def ignore_setting(self, f, change: dict):
+        setting = change["setting"]
+        if change.get("ftype") == "ini":
+            kind, pattern = "ini_key", setting
+        else:
+            kind = "xml"
+            path = setting.split("@")[0]
+            parts = path.split("/")[1:]          # drop the root element
+            pattern = ".//" + "/".join(parts) if parts else "."
+        pattern, ok = QInputDialog.getText(
+            self, "Ignore setting", f"Changes to this will no longer count for {f.display}.\n"
+            f"Pattern ({core.IGNORE_KINDS[kind]}):", text=pattern)
+        if not ok or not pattern.strip():
+            return
+        note, _ = QInputDialog.getText(self, "Ignore setting", "Why? (optional, e.g. 'P3D rewrites this on exit')")
+        self.repo.add_ignore(f.id, kind, pattern.strip(), note)
+        self.statusBar().showMessage(f"Ignoring {pattern} in {f.display}", 6000)
+        self.refresh_all()
+
     # ---------------- built-in editor
     def open_editor(self, f, version_hash=None, label=""):
         from .editor import EditorWindow
@@ -1447,6 +1598,92 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_NAME, "The file did not exist in that version.")
             return
         self.open_editor(f, v[1], f"snapshot #{v[0]}")
+
+    def add_system_info(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Track system information")
+        dlg.resize(560, 460)
+        lay = QVBoxLayout(dlg)
+        lab = QLabel("These are read from the PC every few minutes and tracked like files: history, versions, "
+                     "alerts (e.g. 'GPU driver changed'), archives and Claude can all use them. They are never "
+                     "written back.")
+        lab.setWordWrap(True)
+        lay.addWidget(lab)
+        tracked = {f.path for f in self.repo.files()}
+        boxes = {}
+        for key, (label, _cmd) in core.BUILTIN_PROBES.items():
+            cb = QCheckBox(label)
+            path = core.PROBE_PREFIX + key
+            cb.setChecked(path in tracked or key in ("gpu", "windows", "sim_software", "displays", "hardware"))
+            cb.setEnabled(sys.platform == "win32" and path not in tracked)
+            if path in tracked:
+                cb.setText(label + "  (already tracked)")
+            boxes[key] = cb
+            lay.addWidget(cb)
+        if sys.platform != "win32":
+            lay.addWidget(QLabel("<i>The built-in items are only available on Windows.</i>"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Group:"))
+        grp = QLineEdit(f"{self.repo.machine} – System")
+        row.addWidget(grp)
+        lay.addLayout(row)
+        lay.addWidget(QLabel("<b>Own command</b> (optional) — e.g. <i>Get-Content C:\\ProSim737\\version.txt</i>"))
+        cname = QLineEdit()
+        cname.setPlaceholderText("Name, e.g. 'ProSim version'")
+        ccmd = QLineEdit()
+        ccmd.setPlaceholderText("PowerShell command whose output should be tracked")
+        lay.addWidget(cname)
+        lay.addWidget(ccmd)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            for key, cb in boxes.items():
+                if cb.isEnabled() and cb.isChecked():
+                    core.add_builtin_probe(self.repo, key, grp.text().strip())
+            if cname.text().strip() and ccmd.text().strip():
+                core.add_custom_probe(self.repo, cname.text().strip(), ccmd.text().strip(), grp.text().strip())
+            self.repo.background_probes = False   # first reading now
+            self.repo.ensure_baseline()
+        finally:
+            self.repo.background_probes = True
+            QApplication.restoreOverrideCursor()
+        self.sync_dirty = True
+        self.refresh_files()
+
+    def refresh_probes_bg(self):
+        due = self.repo.probe_due()
+        if not due or getattr(self, "_probing", False):
+            return
+        self._probing = True
+        paths = [f.path for f in due]
+
+        def work(r):
+            out = {}
+            for pth in paths:
+                cmd = core.probe_command(r, pth)
+                if cmd:
+                    out[pth] = core.run_probe(cmd)
+            return out
+
+        def done(res):
+            self._probing = False
+            cache = getattr(self.repo, "_probe_cache", None)
+            if cache is None:
+                cache = self.repo._probe_cache = {}
+            for pth, data in res.items():
+                if data is not None:
+                    cache[pth] = (core.now_ts(), data)
+                elif pth in cache:
+                    cache[pth] = (core.now_ts(), cache[pth][1])
+
+        def fail(e):
+            self._probing = False
+        self.run_bg(work, done, fail)
 
     def edit_file(self):
         f = self.current_file()
@@ -1492,8 +1729,7 @@ class MainWindow(QMainWindow):
             return
         old = self.repo.get_object(self.repo.last_hash(f.id))
         new = self.repo.read_current(f)
-        DiffDialog(f"{f.display}: last snapshot → now",
-                   unified_diff(old, new, "last snapshot", "current file"), self).exec()
+        self.file_diff(f, old, new, "last snapshot", "current file", f"{f.display}: last snapshot → now")
 
     def diff_version_prev(self):
         v = self.current_version()
@@ -1501,18 +1737,16 @@ class MainWindow(QMainWindow):
         if not v or not f:
             return
         _sid, h, prev = v
-        DiffDialog(f"{f.display}: changes in snapshot #{v[0]}",
-                   unified_diff(self.repo.get_object(prev), self.repo.get_object(h), "previous version",
-                                f"snapshot #{v[0]}"), self).exec()
+        self.file_diff(f, self.repo.get_object(prev), self.repo.get_object(h), "previous version",
+                       f"snapshot #{v[0]}", f"{f.display}: changes in snapshot #{v[0]}")
 
     def diff_version_current(self):
         v = self.current_version()
         f = self.current_file()
         if not v or not f:
             return
-        DiffDialog(f"{f.display}: snapshot #{v[0]} → current file",
-                   unified_diff(self.repo.get_object(v[1]), self.repo.read_current(f), f"snapshot #{v[0]}",
-                                "current file"), self).exec()
+        self.file_diff(f, self.repo.get_object(v[1]), self.repo.read_current(f), f"snapshot #{v[0]}",
+                       "current file", f"{f.display}: snapshot #{v[0]} → current file")
 
     def restore_version(self):
         v = self.current_version()
@@ -1543,7 +1777,7 @@ class MainWindow(QMainWindow):
 
     def open_location(self):
         f = self.current_file()
-        if f:
+        if f and not core.is_probe(f):
             open_in_explorer(f.path)
 
     # ================================================================= history tab
@@ -1626,9 +1860,10 @@ class MainWindow(QMainWindow):
             return
         fid, old, new = d[0]
         f = self.repo.file(fid)
-        DiffDialog(f"{f.display if f else fid}: snapshot #{self.selected_snapshot()}",
-                   unified_diff(self.repo.get_object(old), self.repo.get_object(new), "before", "after"),
-                   self).exec()
+        if f is None:
+            return
+        self.file_diff(f, self.repo.get_object(old), self.repo.get_object(new), "before", "after",
+                       f"{f.display}: snapshot #{self.selected_snapshot()}")
 
     def restore_snapshot(self):
         sid = self.selected_snapshot()
@@ -1677,6 +1912,8 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.Accepted:
             return
         path, note, hist = dlg.result_values()
+        upload = dlg.upload.isChecked()
+        self.repo.set("archive_upload", "1" if upload else "0")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             res = core.export_archive(self.repo, path, note, hist, snapshot_id)
@@ -1687,6 +1924,12 @@ class MainWindow(QMainWindow):
         QApplication.restoreOverrideCursor()
         self.repo.set("last_archive_dir", os.path.dirname(path))
         self.sync_dirty = True
+        if upload:
+            self.statusBar().showMessage("Uploading archive…")
+            self.run_bg(lambda r: core.make_sync(r).upload_archive(path),
+                        lambda name: self.tray.showMessage(APP_NAME, f"Archive uploaded to the shared location: {name}",
+                                                           QSystemTrayIcon.Information, 5000),
+                        lambda e: QMessageBox.warning(self, APP_NAME, f"Archive saved, but the upload failed: {e}"))
         miss = f"\n⚠ {res['missing']} tracked file(s) were missing on disk (listed in REPORT.txt)." \
             if res["missing"] else ""
         box = QMessageBox(self)
@@ -1702,8 +1945,38 @@ class MainWindow(QMainWindow):
         self.refresh_all()
 
     def import_archive(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open SimConfigManager archive",
-                                              self.repo.get("last_archive_dir"), "Archive (*.zip)")
+        path = None
+        s = self.sync()
+        if s is not None:
+            choice, ok = QInputDialog.getItem(self, "Import archive", "Where is the archive?",
+                                              ["On this computer…", "In the shared location (archives)…"], 0, False)
+            if not ok:
+                return
+            if choice.startswith("In the shared"):
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                try:
+                    names = s.list_archives()
+                finally:
+                    QApplication.restoreOverrideCursor()
+                if not names:
+                    QMessageBox.information(self, APP_NAME, "No archives in the shared location yet.")
+                    return
+                name, ok = QInputDialog.getItem(self, "Import archive", "Archive:", sorted(names, reverse=True), 0,
+                                                False)
+                if not ok:
+                    return
+                import tempfile
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                try:
+                    path = s.download_archive(name, tempfile.mkdtemp(prefix="scm-archive-"))
+                except Exception as e:  # noqa: BLE001
+                    QMessageBox.warning(self, APP_NAME, f"Download failed: {e}")
+                    return
+                finally:
+                    QApplication.restoreOverrideCursor()
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(self, "Open SimConfigManager archive",
+                                                  self.repo.get("last_archive_dir"), "Archive (*.zip)")
         if not path:
             return
         try:
@@ -1770,6 +2043,18 @@ class MainWindow(QMainWindow):
         self.rule_table.doubleClicked.connect(lambda _i: self.edit_rule())
         lay.addWidget(self.rule_table, 2)
         row = QHBoxLayout()
+        row.addWidget(QLabel("<b>Ignored settings</b> — values that change by themselves (e.g. P3D rewrites window "
+                             "positions on exit). Changes to only these don't count as changes."))
+        row.addStretch()
+        for text, fn in (("Add…", self.add_ignore_dialog), ("Remove", self.remove_ignore)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        lay.addLayout(row)
+        self.ign_table = QTableWidget()
+        setup_table(self.ign_table, ["File", "Type", "Pattern", "Why"], 3)
+        lay.addWidget(self.ign_table, 1)
+        row = QHBoxLayout()
         row.addWidget(QLabel("<b>Event log</b>"))
         row.addStretch()
         b = QPushButton("Clear log")
@@ -1781,7 +2066,44 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.log_table, 3)
         return w
 
+    def refresh_ignores(self):
+        rows = self.repo.ignores()
+        self.ign_table.setRowCount(len(rows))
+        for r, x in enumerate(rows):
+            f = self.repo.file(x["file_id"]) if x["file_id"] else None
+            self.ign_table.setItem(r, 0, item(f.display if f else "(all files)", x["id"]))
+            self.ign_table.setItem(r, 1, item(core.IGNORE_KINDS.get(x["kind"], x["kind"]).split(" (")[0]))
+            self.ign_table.setItem(r, 2, item(x["pattern"]))
+            self.ign_table.setItem(r, 3, item(x["note"] or ""))
+
+    def add_ignore_dialog(self):
+        files = self.repo.files()
+        names = ["(all files)"] + [f"{f.display}  [{f.group}]" for f in files]
+        choice, ok = QInputDialog.getItem(self, "Ignore", "Which file?", names, 0, False)
+        if not ok:
+            return
+        fid = None if choice == names[0] else files[names.index(choice) - 1].id
+        kinds = list(core.IGNORE_KINDS.items())
+        k, ok = QInputDialog.getItem(self, "Ignore", "What kind of setting?", [v for _k, v in kinds], 0, False)
+        if not ok:
+            return
+        kind = kinds[[v for _k, v in kinds].index(k)][0]
+        pattern, ok = QInputDialog.getText(self, "Ignore", f"Pattern — {k}:",
+                                           text={"ini_key": "Section/Key", "ini_section": "Window.*",
+                                                 "xml": ".//Window", "line": "^LastUsed="}[kind])
+        if not ok or not pattern.strip():
+            return
+        note, _ = QInputDialog.getText(self, "Ignore", "Why? (optional)")
+        self.repo.add_ignore(fid, kind, pattern.strip(), note)
+        self.refresh_alerts()
+
+    def remove_ignore(self):
+        for i in selected_data(self.ign_table):
+            self.repo.delete_ignore(i)
+        self.refresh_alerts()
+
     def refresh_alerts(self):
+        self.refresh_ignores()
         rules = self.repo.rules()
         self.rule_table.setRowCount(len(rules))
         for r, ru in enumerate(rules):
@@ -1845,24 +2167,68 @@ class MainWindow(QMainWindow):
     def build_sync_tab(self):
         w = QWidget()
         lay = QVBoxLayout(w)
-        box = QGroupBox("Sync folder (Google Drive, or a shared folder on your local server)")
+        box = QGroupBox("Where to share and back up (all sims use the same place)")
         bl = QVBoxLayout(box)
-        bl.addWidget(QLabel(
-            "Pick a folder that Google Drive for Desktop syncs (e.g. <i>G:\\My Drive\\SimConfigManager</i>) "
-            "or a network share on another PC (e.g. <i>\\\\SERVER\\SimConfig</i>). Use the SAME folder on every "
-            "sim. Each PC only writes its own file, so the sims never conflict, and every config version is "
-            "backed up off-site."))
         row = QHBoxLayout()
+        self.sync_mode = QComboBox()
+        self.sync_mode.addItem("Off", "")
+        self.sync_mode.addItem("Shared folder (Google Drive for Desktop, network share, …)", "folder")
+        self.sync_mode.addItem("Google Drive — direct (no Drive app needed)", "gdrive")
+        row.addWidget(QLabel("Use:"))
+        row.addWidget(self.sync_mode, 1)
+        bl.addLayout(row)
+
+        self.folder_box = QWidget()
+        fl = QHBoxLayout(self.folder_box)
+        fl.setContentsMargins(0, 0, 0, 0)
         self.sync_edit = QLineEdit(self.repo.get("sync_folder"))
-        row.addWidget(self.sync_edit)
+        self.sync_edit.setPlaceholderText(r"e.g. G:\My Drive\SimConfigManager  or  \\SERVER\SimConfig")
+        fl.addWidget(QLabel("Folder:"))
+        fl.addWidget(self.sync_edit, 1)
         b = QPushButton("Browse…")
         b.clicked.connect(self.browse_sync)
-        row.addWidget(b)
-        b = QPushButton("Save")
+        fl.addWidget(b)
+        bl.addWidget(self.folder_box)
+
+        self.drive_box = QWidget()
+        dl = self.drive_form = QFormLayout(self.drive_box)
+        dl.setContentsMargins(0, 0, 0, 0)
+        self.drive_auth = QComboBox()
+        self.drive_auth.addItem("Service account on a Shared Drive (recommended — no login, never expires)",
+                                "service_account")
+        self.drive_auth.addItem("Google account (sign in once in the browser)", "user")
+        dl.addRow("Sign in with:", self.drive_auth)
+        self.sa_row = QWidget()
+        sl = QHBoxLayout(self.sa_row)
+        sl.setContentsMargins(0, 0, 0, 0)
+        self.sa_label = QLabel()
+        self.sa_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        sl.addWidget(self.sa_label, 1)
+        b = QPushButton("Choose key file (.json)…")
+        b.clicked.connect(self.choose_sa_key)
+        sl.addWidget(b)
+        dl.addRow("Service account:", self.sa_row)
+        self.user_row = QWidget()
+        ul = QHBoxLayout(self.user_row)
+        ul.setContentsMargins(0, 0, 0, 0)
+        self.user_label = QLabel()
+        ul.addWidget(self.user_label, 1)
+        b = QPushButton("Choose OAuth client file…")
+        b.clicked.connect(self.choose_oauth_client)
+        ul.addWidget(b)
+        b = QPushButton("Sign in…")
+        b.clicked.connect(self.drive_sign_in)
+        ul.addWidget(b)
+        dl.addRow("Google account:", self.user_row)
+        self.drive_folder = QLineEdit(self.repo.get("gdrive_folder_id"))
+        self.drive_folder.setPlaceholderText("Paste the folder's link from drive.google.com (or its ID)")
+        dl.addRow("Folder:", self.drive_folder)
+        bl.addWidget(self.drive_box)
+
+        row = QHBoxLayout()
+        b = QPushButton("Save && test connection")
         b.clicked.connect(self.save_sync)
         row.addWidget(b)
-        bl.addLayout(row)
-        row = QHBoxLayout()
         self.auto_push_cb = QCheckBox("Upload automatically (every minute when something changed)")
         self.auto_push_cb.setChecked(self.repo.get("auto_push") == "1")
         self.auto_push_cb.toggled.connect(lambda v: self.repo.set("auto_push", "1" if v else "0"))
@@ -1873,10 +2239,19 @@ class MainWindow(QMainWindow):
         row.addWidget(b)
         bl.addLayout(row)
         self.sync_status = QLabel()
+        self.sync_status.setWordWrap(True)
+        self.sync_status.setTextFormat(Qt.RichText)
         bl.addWidget(self.sync_status)
         lay.addWidget(box)
+        mode = self.repo.get("sync_mode") or ("folder" if self.repo.get("sync_folder") else "")
+        self.sync_mode.setCurrentIndex(max(0, self.sync_mode.findData(mode)))
+        self.drive_auth.setCurrentIndex(max(0, self.drive_auth.findData(self.repo.get("gdrive_auth")
+                                                                         or "service_account")))
+        self.sync_mode.currentIndexChanged.connect(lambda _i: self.update_sync_widgets())
+        self.drive_auth.currentIndexChanged.connect(lambda _i: self.update_sync_widgets())
+        self.update_sync_widgets()
 
-        box2 = QGroupBox("Other sims in the sync folder")
+        box2 = QGroupBox("Other sims (from the shared location)")
         b2 = QVBoxLayout(box2)
         row = QHBoxLayout()
         self.machine_combo = QComboBox()
@@ -1902,49 +2277,205 @@ class MainWindow(QMainWindow):
         lay.addWidget(box2, 1)
         return w
 
-    def sync(self) -> Optional[FolderSync]:
-        folder = self.repo.get("sync_folder")
-        if not folder:
+    def sync(self):
+        """The configured sync location (folder or Google Drive), or None."""
+        try:
+            s = core.make_sync(self.repo)
+        except Exception as e:  # noqa: BLE001
+            self.statusBar().showMessage(f"Sync not available: {e}")
             return None
-        s = FolderSync(self.repo, folder)
-        return s if s.ok else None
+        return s
+
+    def update_sync_widgets(self):
+        mode = self.sync_mode.currentData()
+        self.folder_box.setVisible(mode == "folder")
+        self.drive_box.setVisible(mode == "gdrive")
+        auth = self.drive_auth.currentData()
+        files = core.drive_files(self.repo)
+        self.drive_form.setRowVisible(self.sa_row, auth == "service_account")
+        self.drive_form.setRowVisible(self.user_row, auth == "user")
+        self.drive_folder.setEnabled(auth == "service_account")
+        from . import storage
+        if files["service_account"].exists():
+            email = storage.service_account_email(str(files["service_account"]))
+            self.sa_label.setText(f"<b>{html.escape(email)}</b> — add this address as <i>Content manager</i> of "
+                                  "the Shared Drive.")
+        else:
+            self.sa_label.setText("No key file yet. Create a service account in Google Cloud and download a JSON "
+                                  "key (see README).")
+        if files["token"].exists():
+            self.user_label.setText("<span style='color:#2e7d32'>Signed in.</span> The app keeps its files in a "
+                                    "'SimConfigManager' folder in that account's Drive.")
+        elif files["client_secrets"].exists():
+            self.user_label.setText("OAuth client set. Click Sign in.")
+        else:
+            self.user_label.setText("Needs an OAuth client file (Desktop app) from Google Cloud, then sign in.")
+
+    def choose_sa_key(self):
+        p, _ = QFileDialog.getOpenFileName(self, "Service account key", "", "JSON key (*.json)")
+        if not p:
+            return
+        try:
+            data = json.loads(Path(p).read_text(encoding="utf-8"))
+            assert data.get("type") == "service_account" and data.get("client_email")
+        except Exception:  # noqa: BLE001
+            QMessageBox.warning(self, APP_NAME, "That is not a service account key file.")
+            return
+        dst = core.drive_files(self.repo)["service_account"]
+        dst.write_text(json.dumps(data), encoding="utf-8")
+        self.update_sync_widgets()
+        QMessageBox.information(self, APP_NAME, f"Key saved. In Google Drive, open the Shared Drive → Manage members "
+                                f"→ add\n\n{data['client_email']}\n\nas Content manager. Then paste the link of "
+                                "the folder to use and click Save & test.")
+
+    def choose_oauth_client(self):
+        p, _ = QFileDialog.getOpenFileName(self, "OAuth client (Desktop app)", "", "JSON (*.json)")
+        if not p:
+            return
+        try:
+            data = json.loads(Path(p).read_text(encoding="utf-8"))
+            assert "installed" in data
+        except Exception:  # noqa: BLE001
+            QMessageBox.warning(self, APP_NAME, "That is not an OAuth client file of type 'Desktop app'.")
+            return
+        core.drive_files(self.repo)["client_secrets"].write_text(json.dumps(data), encoding="utf-8")
+        self.update_sync_widgets()
+
+    def drive_sign_in(self):
+        from . import storage
+        files = core.drive_files(self.repo)
+        if not files["client_secrets"].exists():
+            QMessageBox.information(self, APP_NAME, "First choose the OAuth client file.")
+            return
+        QMessageBox.information(self, APP_NAME, "Your browser opens now. Sign in with the Google account for the "
+                                "sims and allow access. Come back here afterwards.")
+        try:
+            storage.user_sign_in(str(files["client_secrets"]), str(files["token"]))
+            prov = storage.user_token_provider(str(files["token"]))
+            folder_id = storage.ensure_user_root(prov)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, APP_NAME, f"Sign-in failed: {e}")
+            return
+        self.repo.set("gdrive_folder_id", folder_id)
+        self.drive_folder.setText(folder_id)
+        self.update_sync_widgets()
+        self.save_sync()
 
     def browse_sync(self):
         d = QFileDialog.getExistingDirectory(self, "Sync folder", self.sync_edit.text())
         if d:
             self.sync_edit.setText(os.path.normpath(d))
-            self.save_sync()
 
     def save_sync(self):
-        self.repo.set("sync_folder", self.sync_edit.text().strip())
-        self.sync_dirty = True
-        self.push_now()
-
-    def push_now(self):
+        mode = self.sync_mode.currentData()
+        self.repo.set("sync_mode", mode or "off")
+        self.repo.set("sync_folder", self.sync_edit.text().strip() if mode == "folder" else
+                      (self.repo.get("sync_folder") if mode != "gdrive" else self.repo.get("sync_folder")))
+        if mode == "gdrive":
+            self.repo.set("gdrive_auth", self.drive_auth.currentData())
+            if self.drive_auth.currentData() == "service_account":
+                self.repo.set("gdrive_folder_id", core.parse_drive_folder(self.drive_folder.text()))
+        if not mode:
+            self.sync_status.setText("Sharing is off.")
+            return
         s = self.sync()
-        if not s:
-            QMessageBox.warning(self, APP_NAME, "Sync folder is not set or not reachable.")
+        if s is None:
+            self.sync_status.setText("<span style='color:#c62828'>Not complete yet — see the fields above.</span>")
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            res = s.push()
-            self.sync_dirty = False
-            self.statusBar().showMessage(f"Uploaded: {res['objects_copied']} new file version(s)")
+            if hasattr(s.backend, "check"):
+                name = s.backend.check()
+                self.sync_status.setText(f"<span style='color:#2e7d32'>✔ Connected to Google Drive folder "
+                                         f"<b>{html.escape(name)}</b>.</span> Uploading…")
+            elif not s.ok:
+                raise FileNotFoundError(f"Folder not reachable: {s.where}")
         except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, APP_NAME, f"Upload failed: {e}")
-        finally:
             QApplication.restoreOverrideCursor()
-        self.refresh_sync()
+            self.sync_status.setText(f"<span style='color:#c62828'>✖ {html.escape(str(e))}</span>")
+            return
+        QApplication.restoreOverrideCursor()
+        self.sync_dirty = True
+        self.push_now()
+
+    def run_bg(self, fn, done=None, err=None):
+        """Run fn(bg_repo) on the background worker (its own read-only store connection); callbacks on the UI."""
+        import concurrent.futures
+        if not hasattr(self, "_bg_pool"):
+            self._bg_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="scm-bg")
+            self._bg_local = threading.local()
+        data_dir = self.repo.data_dir
+
+        def job():
+            r = getattr(self._bg_local, "repo", None)
+            if r is None:
+                r = self._bg_local.repo = Repo(data_dir, read_only=True)
+            return fn(r)
+        fut = self._bg_pool.submit(job)
+
+        def poll():
+            if not fut.done():
+                QTimer.singleShot(150, poll)
+                return
+            e = fut.exception()
+            if e is not None:
+                (err or (lambda x: self.statusBar().showMessage(f"Sync: {x}")))(e)
+            elif done:
+                done(fut.result())
+        QTimer.singleShot(150, poll)
+
+    def auto_push(self):
+        if not (self.repo.get("sync_mode") not in ("", "off") and (self.repo.get("sync_folder") or
+                                                                   self.repo.get("sync_mode") == "gdrive")):
+            return
+        now = core.now_ts()
+        if self.repo.get("auto_push") == "1" and self.sync_dirty and not getattr(self, "_pushing", False):
+            self._pushing = True
+            self.sync_dirty = False
+
+            def ok(res):
+                self._pushing = False
+                self.repo.set("last_push", core.now_ts())
+                self._last_status = core.now_ts()
+
+            def fail(e):
+                self._pushing = False
+                self.sync_dirty = True
+                self.statusBar().showMessage(f"Upload failed: {e}")
+            self.run_bg(lambda r: core.make_sync(r).push(), ok, fail)
+        elif now - getattr(self, "_last_status", 0) > 300 and not getattr(self, "_pushing", False):
+            self._last_status = now   # fleet heartbeat every 5 minutes
+            self.run_bg(lambda r: core.make_sync(r).push_status(), None, lambda e: None)
+
+    def push_now(self):
+        if self.sync() is None:
+            QMessageBox.warning(self, APP_NAME, "No sharing location is set up yet.")
+            return
+        self.sync_status.setText(self.sync_status.text().replace(" Uploading…", "") + " Uploading…")
+
+        def ok(res):
+            self.sync_dirty = False
+            self.repo.set("last_push", core.now_ts())
+            self.statusBar().showMessage(f"Uploaded: {res['objects_copied']} new file version(s)")
+            self.refresh_sync()
+
+        def fail(e):
+            QMessageBox.warning(self, APP_NAME, f"Upload failed: {e}")
+            self.refresh_sync()
+        self.run_bg(lambda r: core.make_sync(r).push(), ok, fail)
 
     def refresh_sync(self):
         last = self.repo.get("last_push")
         s = self.sync()
-        if not self.repo.get("sync_folder"):
-            self.sync_status.setText("Not configured.")
+        mode = self.repo.get("sync_mode") or ("folder" if self.repo.get("sync_folder") else "")
+        if mode in ("", "off"):
+            self.sync_status.setText("Sharing is off.")
+            s = None
         elif not s:
-            self.sync_status.setText("<span style='color:#c62828'>Folder not reachable right now.</span>")
+            self.sync_status.setText("<span style='color:#c62828'>Not complete or not reachable right now.</span>")
         else:
-            self.sync_status.setText(f"Last upload: {fmt_ts(float(last)) if last else 'never'}"
+            self.sync_status.setText(f"Using <b>{html.escape(s.where)}</b> · last upload: "
+                                     f"{fmt_ts(float(last)) if last else 'never'}"
                                      + ("  ·  changes waiting" if self.sync_dirty else ""))
         cur = self.machine_combo.currentData()
         self.machine_combo.blockSignals(True)
@@ -2005,9 +2536,11 @@ class MainWindow(QMainWindow):
         except FileNotFoundError as e:
             QMessageBox.warning(self, APP_NAME, str(e))
             return
+        lf = self.repo.find_file_by_path(target)
+        mine = self.repo.read_current(lf) if lf else core.read_file_bytes(target)
         DiffDialog(f"{self.machine_combo.currentData()} → this PC",
-                   unified_diff(remote, core.read_file_bytes(target), f"{self.machine_combo.currentData()}",
-                                "this PC"), self).exec()
+                   unified_diff(remote, mine, f"{self.machine_combo.currentData()}", "this PC"), self,
+                   summary=core.setting_changes(remote, mine, target)).exec()
 
     def copy_remote(self):
         rf, s = self.selected_remote(), self.sync()
@@ -2053,6 +2586,179 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, APP_NAME, f"Import failed: {e}")
             self.refresh_all()
 
+
+
+    # ================================================================= rulebook tab (#6)
+    def build_rulebook_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lab = QLabel("<b>Rulebook</b> — document why settings have their value. A <b>required value</b> locks a "
+                     "setting: you get an alert when it changes, the editor warns before saving, and Claude/ChatGPT "
+                     "won't propose changing it. Notes without a required value are documentation that Claude reads.")
+        lab.setWordWrap(True)
+        lab.setTextFormat(Qt.RichText)
+        lay.addWidget(lab)
+        row = QHBoxLayout()
+        for text, fn in (("Add…", lambda: self.edit_rulebook(None)), ("Edit…", self.edit_rulebook_selected),
+                         ("Delete", self.delete_rulebook)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        row.addStretch()
+        self.rb_summary = QLabel()
+        self.rb_summary.setTextFormat(Qt.RichText)
+        row.addWidget(self.rb_summary)
+        lay.addLayout(row)
+        self.rb_table = QTableWidget()
+        setup_table(self.rb_table, ["Status", "File", "Setting", "Required", "Current value", "Note", "By"], 5)
+        self.rb_table.doubleClicked.connect(lambda _i: self.edit_rulebook_selected())
+        lay.addWidget(self.rb_table, 1)
+        return w
+
+    def refresh_rulebook(self):
+        rows = self.repo.rulebook_status()
+        bad = sum(1 for r in rows if r["ok"] is False)
+        self.rb_summary.setText(f"<b style='color:#c62828'>{bad} setting(s) break the rulebook</b>" if bad else
+                                (f"<span style='color:#2e7d32'>✔ all {sum(1 for r in rows if r['ok'])} locked "
+                                 "settings OK</span>" if rows else ""))
+        self.rb_table.setRowCount(len(rows))
+        for i, r in enumerate(sorted(rows, key=lambda r: (r["ok"] is not False, r["file"], r["selector"]))):
+            st = {True: ("✔ OK", "#2e7d32"), False: ("✖ Violated", "#c62828"), None: ("ℹ note", "#555")}[r["ok"]]
+            self.rb_table.setItem(i, 0, item(st[0], r["id"], st[1], bold=r["ok"] is False))
+            self.rb_table.setItem(i, 1, item(r["file"] or "(general)"))
+            self.rb_table.setItem(i, 2, item(r["selector"]))
+            self.rb_table.setItem(i, 3, item(r["required"] or "–"))
+            self.rb_table.setItem(i, 4, item("–" if r["current"] is None else r["current"]))
+            self.rb_table.setItem(i, 5, item(r["note"] or ""))
+            self.rb_table.setItem(i, 6, item(r["author"] or ""))
+
+    def edit_rulebook_selected(self):
+        ids = selected_data(self.rb_table)
+        if ids:
+            entry = next((e for e in self.repo.rulebook() if e["id"] == ids[0]), None)
+            self.edit_rulebook(entry)
+
+    def edit_rulebook(self, entry: Optional[dict]):
+        dlg = RulebookDialog(self.repo, entry, self)
+        if dlg.exec() == QDialog.Accepted:
+            self.sync_dirty = True
+            self.refresh_rulebook()
+
+    def delete_rulebook(self):
+        ids = selected_data(self.rb_table)
+        if ids and QMessageBox.question(self, APP_NAME, "Delete this rulebook entry?") == QMessageBox.Yes:
+            self.repo.delete_rulebook_entry(ids[0])
+            self.sync_dirty = True
+            self.refresh_rulebook()
+
+    # ================================================================= fleet tab (#4)
+    def build_fleet_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        top = QHBoxLayout()
+        self.fleet_banner = QLabel()
+        self.fleet_banner.setTextFormat(Qt.RichText)
+        self.fleet_banner.setWordWrap(True)
+        top.addWidget(self.fleet_banner, 1)
+        b = QPushButton("Refresh")
+        b.clicked.connect(self.refresh_fleet)
+        top.addWidget(b)
+        lay.addLayout(top)
+        split = QSplitter(Qt.Vertical)
+        self.fleet_table = QTableWidget()
+        setup_table(self.fleet_table, ["Sim", "Online", "Config version", "Files differ", "Rulebook",
+                                       "Alerts (24 h)", "Waiting for approval", "Last change", "Graphics driver",
+                                       "App"], 8)
+        self.fleet_table.itemSelectionChanged.connect(self.show_fleet_detail)
+        split.addWidget(self.fleet_table)
+        self.fleet_detail = QTextEdit()
+        self.fleet_detail.setReadOnly(True)
+        split.addWidget(self.fleet_detail)
+        split.setSizes([360, 260])
+        lay.addWidget(split, 1)
+        self._fleet = []
+        return w
+
+    def refresh_fleet(self):
+        local = core.build_status(self.repo)
+        self._fleet = [local]
+        self.render_fleet()
+        if self.sync() is None:
+            self.fleet_banner.setText("<b>Fleet overview</b><br>Only this PC is shown. Set up sharing (Cloud tab: a "
+                                      "shared folder or Google Drive) on every sim to see them all here.")
+            return
+        self.fleet_banner.setText("<b>Fleet overview</b> — loading the other sims…")
+
+        def done(statuses):
+            others = [x for x in statuses if x.get("machine") != self.repo.machine]
+            self._fleet = [local] + sorted(others, key=lambda x: x.get("machine", ""))
+            self.render_fleet()
+
+        def fail(e):
+            self.fleet_banner.setText(f"<b>Fleet overview</b> — could not read the other sims: {html.escape(str(e))}")
+        self.run_bg(lambda r: core.make_sync(r).statuses(), done, fail)
+
+    def render_fleet(self):
+        now = core.now_ts()
+        rows = self._fleet
+        problems = 0
+        self.fleet_table.setRowCount(len(rows))
+        for i, st in enumerate(rows):
+            age = now - st.get("heartbeat", 0)
+            me = st.get("machine") == self.repo.machine
+            online = me or age < 900
+            mism = st.get("mismatches", [])
+            viol = st.get("rulebook_violations", [])
+            ok = online and not mism and not viol
+            problems += 0 if ok else 1
+            ver = st.get("version")
+            gpu = (st.get("system", {}).get("gpu", "") or "").split("\n")
+            drv = next((ln.split(":", 1)[1].strip() for ln in gpu if "Driver version" in ln), "–")
+            self.fleet_table.setItem(i, 0, item(("● " if ok else "▲ ") + st.get("machine", "?") +
+                                               ("  (this PC)" if me else ""), st.get("machine"),
+                                               "#2e7d32" if ok else "#e65100", bold=True))
+            self.fleet_table.setItem(i, 1, item("yes" if online else f"no — last seen {fmt_ts(st.get('heartbeat', 0))}",
+                                               color=None if online else "#c62828"))
+            self.fleet_table.setItem(i, 2, item(f"v{ver['number']} – {ver['title']}" if ver else "no version yet",
+                                               color=None if ver else "#777"))
+            self.fleet_table.setItem(i, 3, item(len(mism) if mism else "✔ none", color="#e65100" if mism else
+                                               "#2e7d32"))
+            self.fleet_table.setItem(i, 4, item(f"{len(viol)} broken" if viol else "✔", color="#c62828" if viol else
+                                               "#2e7d32"))
+            self.fleet_table.setItem(i, 5, item(st.get("alerts_24h", 0)))
+            self.fleet_table.setItem(i, 6, item(st.get("pending_proposals", 0) or ""))
+            self.fleet_table.setItem(i, 7, item(fmt_ts(st["last_change"]) if st.get("last_change") else "–"))
+            self.fleet_table.setItem(i, 8, item(drv))
+            self.fleet_table.setItem(i, 9, item(st.get("app_version", "")))
+        n = len(rows)
+        if not self.fleet_banner.text().endswith("loading the other sims…") or n > 1:
+            self.fleet_banner.setText(
+                f"<b>Fleet overview</b> — {n} sim(s): " +
+                ("<span style='color:#2e7d32'>all OK</span>" if not problems else
+                 f"<span style='color:#e65100'>{problems} need attention</span>"))
+
+    def show_fleet_detail(self):
+        ids = selected_data(self.fleet_table)
+        st = next((x for x in self._fleet if ids and x.get("machine") == ids[0]), None)
+        if not st:
+            self.fleet_detail.clear()
+            return
+        parts = [f"<h3 style='margin:0'>{html.escape(st.get('machine', ''))}</h3>",
+                 f"<p style='color:#555'>Last heartbeat {fmt_ts(st.get('heartbeat', 0))} · app "
+                 f"{html.escape(st.get('app_version', ''))} · {st.get('files', 0)} files tracked</p>"]
+        if st.get("mismatches"):
+            parts.append("<b>Files that differ from the version:</b><ul>" + "".join(
+                f"<li>{html.escape(m['file'])} [{html.escape(m['group'])}] — "
+                f"{html.escape(core.STATUS_TEXT.get(m['status'], m['status']))}</li>" for m in st["mismatches"]) + "</ul>")
+        if st.get("rulebook_violations"):
+            parts.append("<b style='color:#c62828'>Rulebook broken:</b><ul>" + "".join(
+                f"<li>{html.escape(v)}</li>" for v in st["rulebook_violations"]) + "</ul>")
+        if st.get("recent_alerts"):
+            parts.append("<b>Recent alerts:</b><ul>" + "".join(
+                f"<li>{fmt_ts(a['ts'])} — {html.escape(a['message'])}</li>" for a in st["recent_alerts"]) + "</ul>")
+        for k, v in (st.get("system") or {}).items():
+            parts.append(f"<b>{html.escape(core.BUILTIN_PROBES.get(k, (k,))[0])}</b><pre>{html.escape(v)}</pre>")
+        self.fleet_detail.setHtml("".join(parts))
 
     # ================================================================= Claude tab
     def build_claude_tab(self):
@@ -2449,7 +3155,77 @@ class MainWindow(QMainWindow):
             self.autostart_cb.setEnabled(False)
             self.autostart_cb.setToolTip("Needs administrator rights to set up")
         form.addRow("", QLabel(f"{APP_NAME} {APP_VERSION}"))
+        upd = QWidget()
+        ul = QHBoxLayout(upd)
+        ul.setContentsMargins(0, 0, 0, 0)
+        b = QPushButton("Check for updates")
+        b.clicked.connect(lambda: self.check_updates(manual=True))
+        ul.addWidget(b)
+        self.upd_daily = QCheckBox("Check daily")
+        self.upd_daily.setChecked(self.repo.get("update_check") != "0")
+        self.upd_daily.toggled.connect(lambda v: self.repo.set("update_check", "1" if v else "0"))
+        ul.addWidget(self.upd_daily)
+        ul.addStretch()
+        form.addRow("Updates", upd)
+        self.upd_token = QLineEdit(self.repo.get("github_token"))
+        self.upd_token.setEchoMode(QLineEdit.Password)
+        self.upd_token.setPlaceholderText("Only needed while the GitHub repository is private (read-only token)")
+        self.upd_token.editingFinished.connect(lambda: self.repo.set("github_token", self.upd_token.text().strip()))
+        form.addRow("GitHub access token", self.upd_token)
+        self.probe_spin = QSpinBox()
+        self.probe_spin.setRange(1, 1440)
+        self.probe_spin.setSuffix(" min")
+        self.probe_spin.setValue(int(float(self.repo.get("probe_minutes") or 15)))
+        self.probe_spin.valueChanged.connect(lambda v: self.repo.set("probe_minutes", v))
+        form.addRow("Re-read system info every", self.probe_spin)
         return w
+
+    def check_updates(self, manual: bool = False):
+        from . import updater
+        token = self.repo.get("github_token")
+
+        def done(rel):
+            self.repo.set("last_update_check", core.now_ts())
+            if rel is None:
+                if manual:
+                    QMessageBox.information(self, APP_NAME, f"You have the latest version ({APP_VERSION}).")
+                return
+            if not manual:
+                self.tray.showMessage(APP_NAME, f"Update available: {rel['tag']}. Open Settings → Check for updates.",
+                                      QSystemTrayIcon.Information, 10000)
+                return
+            notes = rel["notes"][:1500] or "(no release notes)"
+            if not updater.can_self_update():
+                QMessageBox.information(self, APP_NAME, f"Version {rel['tag']} is available:\n{rel['url']}\n\n{notes}")
+                return
+            if QMessageBox.question(self, APP_NAME, f"Version {rel['tag']} is available (you have {APP_VERSION}).\n\n"
+                                    f"{notes}\n\nDownload and install now? The app restarts by itself; your data "
+                                    "and settings are kept.") != QMessageBox.Yes:
+                return
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                path = updater.fetch_installer(rel, token)
+            except Exception as e:  # noqa: BLE001
+                QApplication.restoreOverrideCursor()
+                QMessageBox.warning(self, APP_NAME, f"Update failed: {e}")
+                return
+            QApplication.restoreOverrideCursor()
+            self.repo.log(f"Installing update {rel['tag']}")
+            updater.run_installer(path)
+            self.quit_app()
+
+        def fail(e):
+            if manual:
+                QMessageBox.warning(self, APP_NAME, str(e))
+        self.run_bg(lambda r: updater.check(APP_VERSION, updater.DEFAULT_REPO, token), done, fail)
+
+    def daily_update_check(self):
+        if self.repo.get("update_check") == "0":
+            return
+        last = float(self.repo.get("last_update_check") or 0)
+        if core.now_ts() - last > 86400:
+            self.repo.set("last_update_check", core.now_ts())
+            self.check_updates(manual=False)
 
     def save_machine(self):
         name = self.machine_edit.text().strip()

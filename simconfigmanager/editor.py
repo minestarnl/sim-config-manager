@@ -2,6 +2,7 @@
 validation, and saving that keeps the file's encoding/line endings and records a snapshot."""
 from __future__ import annotations
 
+import html
 import os
 import re
 from typing import Optional
@@ -486,13 +487,14 @@ class EditorWindow(QMainWindow):
                  version_label: str = "", parent=None):
         super().__init__(parent)
         self.repo, self.file, self.on_saved = repo, f, on_saved
-        self.read_only = version_hash is not None
+        self.probe = core.is_probe(f)
+        self.read_only = version_hash is not None or self.probe
         self.version_hash = version_hash
         self.version_label = version_label
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.resize(1100, 760)
 
-        if self.read_only:
+        if version_hash is not None:
             data = repo.get_object(version_hash)
             self.disk_hash = None
         else:
@@ -550,7 +552,10 @@ class EditorWindow(QMainWindow):
         self.update_pos()
         self.update_title()
 
-        if self.read_only:
+        if self.probe and version_hash is None:
+            self.show_banner("System information read from this PC (read-only). It is refreshed every few minutes "
+                             "and recorded in History like a file.", "#e3f2fd", "#0d47a1")
+        elif self.read_only:
             self.show_banner(f"Read-only view of <b>{version_label}</b>. "
                              "<a href='restore'>Restore this version to disk…</a>", "#e3f2fd", "#0d47a1")
         elif self.missing:
@@ -765,6 +770,12 @@ class EditorWindow(QMainWindow):
         if probs:
             warn.append(f"⚠ {len(probs)} syntax problem(s): first on line {probs[0][0]}: {probs[0][1]}. "
                         "The sim may not read a broken file.")
+        for v in self.repo.rulebook_status({self.file.id: new}):
+            if v["file_id"] == self.file.id and v["ok"] is False:
+                warn.append(f"⛔ Rulebook: {html.escape(v['selector'])} must be <b>{html.escape(v['required'])}</b> "
+                            f"(would be {html.escape(str(v['current']))})"
+                            + (f" — {html.escape(v['note'])}" if v.get("note") else "")
+                            + ". You can still save, but an alert will be logged.")
         running = core.running_processes(self.repo.get("warn_processes").split(";"))
         if running:
             warn.append("⚠ Running now: " + ", ".join(running) + ". Prepar3D rewrites Prepar3D.cfg when it exits, "
@@ -779,19 +790,13 @@ class EditorWindow(QMainWindow):
                          "<br>".join(warn), self)
         if dlg.exec() != QDialog.Accepted:
             return False
+        note = dlg.note.text().strip()
         try:
-            if disk is not None:
-                self.repo.put_object(disk)
-            self.repo.commit(f"Before edit of {self.file.display}", kind="safety", file_ids=[self.file.id])
-            core.write_file_atomic(self.file.path, new)
+            self.repo.write_file(self.file, new, note)
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, APP_NAME, f"Could not save: {e}\n\nIs the file open in the sim, or does "
                                 "the app need administrator rights?")
             return False
-        note = dlg.note.text().strip()
-        self.repo._stat_cache.pop(self.file.id, None)
-        self.repo.commit(f"Edited {self.file.display}" + (f": {note}" if note else ""), kind="manual",
-                         file_ids=[self.file.id])
         self.repo.log(f"Edited {self.file.display} in the built-in editor" + (f" — {note}" if note else ""),
                       file_id=self.file.id)
         self.disk_hash = core.sha256_bytes(new)

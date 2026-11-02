@@ -29,6 +29,19 @@ jobs:
       - name: Run tests
         run: python -m pytest -q tests
 
+      - name: Read app version
+        id: ver
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = python -c "from simconfigmanager.core import APP_VERSION; print(APP_VERSION)"
+          "version=$v" >> $env:GITHUB_OUTPUT
+          gh release view "v$v" --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -eq 0) { "exists=true" >> $env:GITHUB_OUTPUT } else { "exists=false" >> $env:GITHUB_OUTPUT }
+          exit 0
+
+
       - name: Build SimConfigManager.exe
         run: python -m PyInstaller --noconfirm --onefile --windowed --uac-admin --name SimConfigManager SimConfigManager.pyw
 
@@ -45,10 +58,19 @@ jobs:
           $out
           if (-not ($out -match '"read_file"')) { throw "connector did not answer tools/list" }
 
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Qp "/DMyAppVersion=${{ steps.ver.outputs.version }}" installer\SimConfigManager.iss
+          if ($LASTEXITCODE -ne 0) { throw "installer build failed" }
+          Get-ChildItem dist
+
       - name: Checksum
         shell: pwsh
         run: |
-          $lines = foreach ($n in "SimConfigManager.exe", "SimConfigManager-MCP.exe") {
+          $setup = "SimConfigManager-Setup-${{ steps.ver.outputs.version }}.exe"
+          $lines = foreach ($n in $setup, "SimConfigManager.exe", "SimConfigManager-MCP.exe") {
             "$((Get-FileHash "dist\$n" -Algorithm SHA256).Hash.ToLower()) *$n"
           }
           $lines | Out-File -Encoding ascii dist\SHA256SUMS.txt
@@ -58,21 +80,10 @@ jobs:
         with:
           name: SimConfigManager-windows
           path: |
+            dist/SimConfigManager-Setup-*.exe
             dist/SimConfigManager.exe
             dist/SimConfigManager-MCP.exe
             dist/SHA256SUMS.txt
-
-      - name: Read app version
-        id: ver
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $v = python -c "from simconfigmanager.core import APP_VERSION; print(APP_VERSION)"
-          "version=$v" >> $env:GITHUB_OUTPUT
-          gh release view "v$v" --repo "${{ github.repository }}" *> $null
-          if ($LASTEXITCODE -eq 0) { "exists=true" >> $env:GITHUB_OUTPUT } else { "exists=false" >> $env:GITHUB_OUTPUT }
-          exit 0
 
       # A release is published automatically the first time a new APP_VERSION (simconfigmanager/core.py)
       # reaches main, or when a v* tag is pushed. Existing releases are never overwritten.
@@ -86,6 +97,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: SimConfigManager ${{ steps.ver.outputs.version }}
           files: |
+            dist/SimConfigManager-Setup-*.exe
             dist/SimConfigManager.exe
             dist/SimConfigManager-MCP.exe
             dist/SHA256SUMS.txt

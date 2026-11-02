@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 APP_NAME = "SimConfigManager"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 LEGACY_NAMES = ("SimConfigKeeper",)   # earlier name of this app (≤ 1.3)
 
 
@@ -727,8 +727,18 @@ class Repo:
         except ValueError:
             minutes = 15
         hit = cache.get(f.path)
-        if hit and not force and now_ts() - hit[0] < minutes * 60:
+        if hit and not force and (now_ts() - hit[0] < minutes * 60 or getattr(self, "background_probes", False)):
             return hit[1]
+        if not hit and not force and getattr(self, "background_probes", False):
+            # the app refreshes probes in the background; until then use the last recorded value
+            last = self.last_hash(f.id)
+            if last:
+                try:
+                    data = self.get_object(last)
+                    cache[f.path] = (0, data)
+                    return data
+                except FileNotFoundError:
+                    pass
         cmd = probe_command(self, f.path)
         if cmd is None:
             return None
@@ -737,6 +747,19 @@ class Repo:
             data = hit[1]
         cache[f.path] = (now_ts(), data)
         return data
+
+    def running_sim_processes(self) -> list[str]:
+        return running_processes(self.get("warn_processes").split(";"))
+
+    def probe_due(self) -> list[TrackedFile]:
+        """Probes whose cached output is older than the refresh interval."""
+        try:
+            minutes = float(self.get("probe_minutes") or 15)
+        except ValueError:
+            minutes = 15
+        cache = getattr(self, "_probe_cache", {}) or {}
+        return [f for f in self.files() if is_probe(f)
+                and now_ts() - cache.get(f.path, (0, None))[0] >= minutes * 60]
 
     def refresh_probes(self) -> None:
         for f in self.files():
@@ -1411,6 +1434,16 @@ def drive_files(repo: Repo) -> dict:
             "token": d / "gdrive_token.json"}
 
 
+_TOKEN_PROVIDERS: dict = {}
+
+
+def parse_drive_folder(text: str) -> str:
+    """Accept a Drive folder link or a bare ID."""
+    text = text.strip()
+    m = re.search(r"/folders/([A-Za-z0-9_-]+)", text) or re.search(r"[?&]id=([A-Za-z0-9_-]+)", text)
+    return m.group(1) if m else text
+
+
 def make_sync(repo: Repo) -> Optional[Sync]:
     """The configured sync location, or None. Settings: sync_mode = folder | gdrive."""
     mode = repo.get("sync_mode") or ("folder" if repo.get("sync_folder") else "")
@@ -1423,12 +1456,15 @@ def make_sync(repo: Repo) -> Optional[Sync]:
         root = repo.get("gdrive_folder_id")
         if not root:
             return None
-        if auth == "service_account" and files["service_account"].exists():
-            prov = storage.service_account_token_provider(str(files["service_account"]))
-        elif auth == "user" and files["token"].exists():
-            prov = storage.user_token_provider(str(files["token"]))
-        else:
+        key_file = files["service_account"] if auth == "service_account" else files["token"]
+        if not key_file.exists():
             return None
+        ck = (auth, str(key_file), key_file.stat().st_mtime_ns)
+        prov = _TOKEN_PROVIDERS.get(ck)
+        if prov is None:
+            prov = (storage.service_account_token_provider(str(key_file)) if auth == "service_account"
+                    else storage.user_token_provider(str(key_file)))
+            _TOKEN_PROVIDERS[ck] = prov
         return Sync(repo, storage.DriveBackend(prov, root, label="Google Drive"))
     return None
 
@@ -1436,7 +1472,7 @@ def make_sync(repo: Repo) -> Optional[Sync]:
 def build_status(repo: Repo) -> dict:
     """Small heartbeat for the fleet overview (written every few minutes)."""
     ver, status = repo.version_status()
-    mism = [x for x in status if x.status in ("modified", "missing", "new")]
+    mism = [x for x in status if x.status in ("modified", "missing", "new")] if ver else []
     day = now_ts() - 86400
     alerts = [e for e in repo.events(500) if e["level"] in ("alert", "warning") and e["ts"] > day]
     last = repo.latest_snapshot()
@@ -2572,3 +2608,42 @@ def rulebook_violations_for(repo, f: TrackedFile, new_data: bytes) -> list[dict]
 
 for _fn in (rulebook, save_rulebook_entry, delete_rulebook_entry, rulebook_status):
     setattr(Repo, _fn.__name__, _fn)
+
+
+# =========================================================================== keep startup / Claude paths current
+
+def autostart_command() -> Optional[str]:
+    """The program the start-at-logon task runs (None if no task)."""
+    if sys.platform != "win32":
+        return None
+    import subprocess
+    r = subprocess.run(["schtasks", "/Query", "/TN", TASK_NAME, "/XML"], capture_output=True, **_no_window())
+    if r.returncode != 0:
+        return None
+    text = r.stdout.decode("utf-16", errors="replace") if r.stdout[:2] in (b"\xff\xfe", b"\xfe\xff") \
+        else r.stdout.decode(errors="replace")
+    m = re.search(r"<Command>(.*?)</Command>", text, re.S)
+    return m.group(1).strip() if m else None
+
+
+def repair_paths_after_move(data_dir: Path) -> list[str]:
+    """After installing/updating into another folder, point the logon task and Claude Desktop at this exe."""
+    fixed = []
+    if not getattr(sys, "frozen", False):
+        return fixed
+    cmd = autostart_command()
+    if cmd and os.path.normcase(cmd) != os.path.normcase(sys.executable):
+        set_autostart(True)
+        fixed.append("start-at-logon task")
+    want, _args = connector_command(data_dir)
+    for p in claude_desktop_config_paths():
+        try:
+            cfg = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        cur = cfg.get("mcpServers", {}).get(MCP_SERVER_KEY, {}).get("command")
+        if cur and os.path.normcase(cur) != os.path.normcase(want):
+            connect_claude_desktop(data_dir, True)
+            fixed.append("Claude Desktop connector")
+            break
+    return fixed
