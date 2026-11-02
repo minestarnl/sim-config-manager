@@ -20,6 +20,8 @@ OUT.mkdir(parents=True, exist_ok=True)
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox, QTableWidget  # noqa: E402
 
 app = QApplication(sys.argv)
+from simconfigmanager import theme  # noqa: E402
+theme.init(app, os.environ.get("SCM_THEME", "dark"))
 from simconfigmanager import core, editor, gui  # noqa: E402
 from simconfigmanager.core import Repo, Rule  # noqa: E402
 
@@ -107,6 +109,21 @@ for i, (label, group, win, text) in enumerate(FILES):
 fid = {f.label: f for f in repo.files()}
 path = {f.label: Path(f.path) for f in repo.files()}
 
+# demo system information (real values come from PowerShell on Windows)
+DEMO_PROBES = {
+    "gpu": "NVIDIA GeForce RTX 4080\n  Driver version : 32.0.15.6603\n  Driver date    : 2024-10-04\n"
+           "  Video processor: NVIDIA GeForce RTX 4080\n\nnvidia-smi:\nNVIDIA GeForce RTX 4080, 566.03, 95.03.1C.00.95, 4\n",
+    "windows": "Microsoft Windows 11 Pro\nVersion 23H2  build 22631.4317\nEdition Professional\nArchitecture 64-bit\n",
+    "displays": "\\\\.\\DISPLAY1  3840x2160 at 0,0  (primary)\n\\\\.\\DISPLAY2  1920x1080 at 3840,0\n"
+                "\\\\.\\DISPLAY3  1920x1080 at 5760,0\nMonitor: SAM Odyssey G7\nMonitor: EPS Projector\n",
+}
+repo.background_probes = True
+repo._probe_cache = {}
+for key, text in DEMO_PROBES.items():
+    repo._probe_cache[core.PROBE_PREFIX + key] = (time.time() + 10 ** 6, text.encode())
+    repo.add_file(core.PROBE_PREFIX + key, core.BUILTIN_PROBES[key][0], "Sim 1 – System")
+repo.ensure_baseline()
+
 QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
 QMessageBox.information = staticmethod(lambda *a, **k: None)
 
@@ -175,20 +192,6 @@ def shot(widget, name):
     print("saved", name)
 
 
-# demo system information (real values come from PowerShell on Windows)
-DEMO_PROBES = {
-    "gpu": "NVIDIA GeForce RTX 4080\n  Driver version : 32.0.15.6603\n  Driver date    : 2024-10-04\n"
-           "  Video processor: NVIDIA GeForce RTX 4080\n\nnvidia-smi:\nNVIDIA GeForce RTX 4080, 566.03, 95.03.1C.00.95, 4\n",
-    "windows": "Microsoft Windows 11 Pro\nVersion 23H2  build 22631.4317\nEdition Professional\nArchitecture 64-bit\n",
-    "displays": "\\\\.\\DISPLAY1  3840x2160 at 0,0  (primary)\n\\\\.\\DISPLAY2  1920x1080 at 3840,0\n"
-                "\\\\.\\DISPLAY3  1920x1080 at 5760,0\nMonitor: SAM Odyssey G7\nMonitor: EPS Projector\n",
-}
-repo.background_probes = True
-repo._probe_cache = {}
-for key, text in DEMO_PROBES.items():
-    repo._probe_cache[core.PROBE_PREFIX + key] = (time.time() + 10 ** 6, text.encode())
-    repo.add_file(core.PROBE_PREFIX + key, core.BUILTIN_PROBES[key][0], "Sim 1 – System")
-repo.ensure_baseline()
 repo.add_ignore(fid["Prepar3D.cfg"].id, "ini_section", "window.*", "P3D rewrites window positions on exit")
 repo.save_rulebook_entry({"file_id": fid["Prepar3D.cfg"].id, "selector": "GRAPHICS/TEXTURE_MAX_LOAD",
                           "required": "4096", "note": "Certified value — lower causes blurry ground textures",

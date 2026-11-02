@@ -41,7 +41,7 @@ jobs:
       # The app asks for administrator rights itself when it starts as the sim's own app,
       # and doesn't need them in remote mode (--remote), so no requireAdministrator manifest.
       - name: Build SimConfigManager.exe
-        run: python -m PyInstaller --noconfirm --onefile --windowed --name SimConfigManager SimConfigManager.pyw
+        run: python -m PyInstaller --noconfirm --onefile --windowed --name SimConfigManager --add-data "simconfigmanager/assets;simconfigmanager/assets" SimConfigManager.pyw
 
       # Claude connector: console program (stdin/stdout), no admin rights, no Qt
       - name: Build SimConfigManager-MCP.exe
@@ -94,7 +94,8 @@ jobs:
       - name: Build the Mac app (remote mode)
         run: |
           python -m PyInstaller --noconfirm --windowed --name SimConfigManager \
-            --osx-bundle-identifier nl.simconfigmanager.app SimConfigManager.pyw
+            --osx-bundle-identifier nl.simconfigmanager.app \
+            --add-data "simconfigmanager/assets:simconfigmanager/assets" SimConfigManager.pyw
           ditto -c -k --keepParent dist/SimConfigManager.app dist/SimConfigManager-mac.zip
           ls -la dist
 

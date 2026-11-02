@@ -49,6 +49,8 @@ def main():
         # user clicked "No" on the UAC prompt: carry on without admin rights
 
     app = QApplication(sys.argv)
+    from simconfigmanager import theme
+    theme.init(app)
     app.setApplicationName(APP_NAME)
     app.setWindowIcon(make_icon())
     app.setQuitOnLastWindowClosed(False)
@@ -100,6 +102,8 @@ def run_remote() -> int:
     """Remote app: pick a sim and work on it over the network."""
     from simconfigmanager.gui import open_connect_dialog
     app = QApplication(sys.argv)
+    from simconfigmanager import theme
+    theme.init(app)
     app.setApplicationName(APP_NAME)
     app.setWindowIcon(make_icon())
     app.setQuitOnLastWindowClosed(False)

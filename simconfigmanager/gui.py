@@ -11,16 +11,17 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, QSize
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap, QBrush, QPen
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap, QBrush, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-    QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+    QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSpinBox, QSplitter,
-    QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
     QColorDialog, QScrollArea,
 )
 
-from . import core, net
+from . import core, net, theme
+from .theme import TLabel as QLabel, TTextEdit as QTextEdit  # theme-aware versions
 from .core import (APP_NAME, APP_VERSION, Repo, Rule, RULE_HELP, RULE_KINDS, fmt_ts,
                    unified_diff)
 
@@ -65,7 +66,7 @@ def item(text, data=None, color: Optional[str] = None, bold=False) -> QTableWidg
     if data is not None:
         it.setData(Qt.UserRole, data)
     if color:
-        it.setForeground(QBrush(QColor(color)))
+        it.setForeground(QBrush(QColor(theme.c(color))))
     if bold:
         f = it.font()
         f.setBold(True)
@@ -229,7 +230,7 @@ class DiffDialog(QDialog):
             for c in summary:
                 it = QListWidgetItem(core.describe_change(c))
                 it.setData(Qt.UserRole, c)
-                it.setForeground(QBrush(QColor(colors.get(c["kind"], "#000"))))
+                it.setForeground(QBrush(QColor(theme.c(colors.get(c["kind"], "#000")))))
                 self.sum_list.addItem(it)
             lay.addWidget(self.sum_list)
             if ignore_cb:
@@ -244,7 +245,7 @@ class DiffDialog(QDialog):
             lay.addWidget(QLabel("<b>Line by line</b>"))
         view = QTextEdit()
         view.setReadOnly(True)
-        view.setFont(QFont("Consolas", 10))
+        view.setFont(theme.mono_font(10))
         if not diff_text.strip():
             diff_text = "(no differences)"
         lines = []
@@ -738,7 +739,7 @@ class NetSetupDialog(QDialog):
         lay.addLayout(row)
         self.text = QTextEdit()
         self.text.setReadOnly(True)
-        self.text.setFont(QFont("Consolas", 9))
+        self.text.setFont(theme.mono_font(9))
         lay.addWidget(self.text, 1)
         warn = QLabel("⚠ This contains the access key for <b>" + html.escape(key["name"]) + "</b>. Send it "
                       "privately (e.g. AirDrop or a direct message), not in a group chat. Remove the person in the "
@@ -837,7 +838,7 @@ class ProposalDialog(QDialog):
             lay.addWidget(lab)
         view = QTextEdit()
         view.setReadOnly(True)
-        view.setFont(QFont("Consolas", 10))
+        view.setFont(theme.mono_font(10))
         out = []
         for ln in core.unified_diff(cur, new, "now", "proposed").splitlines():
             e = html.escape(ln) or "&nbsp;"
@@ -904,7 +905,8 @@ class MainWindow(QMainWindow):
         self.resize(1200, 760)
 
         self.tabs = QTabWidget()
-        self.setCentralWidget(self.tabs)
+        self.tabs.tabBar().hide()
+        self.tabs.setDocumentMode(True)
         self.tab_versions = self.build_versions_tab()
         self.tab_quick = self.build_quick_tab()
         self.tab_files = self.build_files_tab()
@@ -926,6 +928,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.tab_claude, "Claude")
         self.tabs.addTab(self.tab_settings, "Settings")
         self.tabs.currentChanged.connect(lambda _i: self.refresh_all())
+        self.build_chrome()
         self.statusBar().showMessage("Ready")
 
         self.build_tray()
@@ -1088,6 +1091,133 @@ class MainWindow(QMainWindow):
             fn()
         self.update_version_indicator()
 
+    # ================================================================= VS Code-style chrome
+    PAGES = {  # tab attribute: (title, codicon, subtitle)
+        "tab_fleet": ("Fleet", "fleet", "Every sim at a glance"),
+        "tab_versions": ("Versions", "versions", "Numbered configurations and what differs from them"),
+        "tab_quick": ("Quick restore", "restore", "Put all files back to a saved setup"),
+        "tab_files": ("Files", "files", "Tracked files and their history"),
+        "tab_history": ("History", "history", "Every recorded snapshot"),
+        "tab_rulebook": ("Rulebook", "rulebook", "Documented and locked settings"),
+        "tab_alerts": ("Alerts", "alerts", "Rules, ignored settings and the event log"),
+        "tab_sync": ("Cloud & other sims", "cloud", "Google Drive or a shared folder"),
+        "tab_claude": ("AI assistants & network", "claude", "Claude, ChatGPT and remote access"),
+        "tab_settings": ("Settings", "settings", ""),
+    }
+
+    def build_chrome(self):
+        central = QWidget()
+        h = QHBoxLayout(central)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
+        bar = QWidget()
+        bar.setObjectName("ActivityBar")
+        bar.setFixedWidth(48)
+        bl = QVBoxLayout(bar)
+        bl.setContentsMargins(0, 4, 0, 4)
+        bl.setSpacing(0)
+        from PySide6.QtWidgets import QButtonGroup, QToolButton
+        self.activity = {}
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        for idx in range(self.tabs.count()):
+            page = self.tabs.widget(idx)
+            attr = next(a for a in self.PAGES if getattr(self, a, None) is page)
+            title, glyph, _sub = self.PAGES[attr]
+            b = QToolButton()
+            b.setCheckable(True)
+            b.setFixedSize(48, 48)
+            b.setIconSize(QSize(24, 24))
+            b.setToolTip(title)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _c=False, i=idx: self.tabs.setCurrentIndex(i))
+            group.addButton(b)
+            self.activity[idx] = (b, glyph)
+            if attr == "tab_settings":
+                bl.addStretch(1)
+            bl.addWidget(b)
+        h.addWidget(bar)
+        right = QWidget()
+        v = QVBoxLayout(right)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        header = QWidget()
+        header.setObjectName("PageHeader")
+        header.setFixedHeight(40)
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(16, 0, 16, 0)
+        self.page_title = QLabel()
+        self.page_title.setObjectName("PageTitle")
+        self.page_subtitle = QLabel()
+        self.page_subtitle.setObjectName("PageSubtitle")
+        hl.addWidget(self.page_title)
+        hl.addSpacing(10)
+        hl.addWidget(self.page_subtitle)
+        hl.addStretch(1)
+        v.addWidget(header)
+        body = QWidget()
+        bv = QVBoxLayout(body)
+        bv.setContentsMargins(12, 10, 12, 8)
+        bv.addWidget(self.tabs)
+        v.addWidget(body, 1)
+        h.addWidget(right, 1)
+        self.setCentralWidget(central)
+
+        sb = self.statusBar()
+        sb.setSizeGripEnabled(False)
+        sb.setProperty("remote", self.remote)
+        self.sb_host = QLabel()
+        self.sb_version = QLabel()
+        self.sb_net = QLabel()
+        self.sb_app = QLabel(f"{APP_NAME} {APP_VERSION}")
+        for w in (self.sb_host, self.sb_version, self.sb_net, self.sb_app):
+            sb.addPermanentWidget(w)
+        self.tabs.currentChanged.connect(lambda _i: self.sync_activity())
+        self.sync_activity()
+
+    @staticmethod
+    def _glyph(name: str) -> str:
+        return (f"<span style=\"font-family:'{theme._ICON_FAMILY}'\">"
+                f"{chr(theme.ICONS.get(name, theme.ICONS['dot']))}</span>")
+
+    def sync_activity(self):
+        if not hasattr(self, "activity"):
+            return
+        cur = self.tabs.currentIndex()
+        for idx, (b, glyph) in self.activity.items():
+            text = self.tabs.tabText(idx)
+            badge = text[text.rfind("(") + 1:-1] if text.endswith(")") and "(" in text else None
+            ico = QIcon()
+            ico.addPixmap(theme.glyph_pixmap(glyph, theme.T["activity_fg"], 24, badge), QIcon.Normal, QIcon.Off)
+            ico.addPixmap(theme.glyph_pixmap(glyph, theme.T["activity_active"], 24, badge), QIcon.Normal, QIcon.On)
+            ico.addPixmap(theme.glyph_pixmap(glyph, theme.T["activity_active"], 24, badge), QIcon.Active, QIcon.Off)
+            b.setIcon(ico)
+            b.setChecked(idx == cur)
+            b.setToolTip(text)
+        page = self.tabs.currentWidget()
+        attr = next((a for a in self.PAGES if getattr(self, a, None) is page), None)
+        if attr:
+            title, _g, sub = self.PAGES[attr]
+            self.page_title.setText(title.upper())
+            self.page_subtitle.setText(sub)
+
+    def update_statusbar(self, version_text: str = ""):
+        if not hasattr(self, "sb_host"):
+            return
+        if self.remote:
+            self.sb_host.setText(f"{self._glyph('remote')} Remote: {html.escape(self.repo.machine)}")
+        else:
+            self.sb_host.setText(f"{self._glyph('fleet')} {html.escape(self.repo.machine)}")
+        if version_text:
+            self.sb_version.setText(version_text)
+        srv = getattr(self, "net_server", None)
+        if self.remote:
+            self.sb_net.setText(f"{self._glyph('plug')} {html.escape(self.repo.base.split('//')[-1])}")
+        elif srv:
+            self.sb_net.setText(f"{self._glyph('broadcast')} Network :{srv.port}")
+        else:
+            self.sb_net.setText("")
+
     def update_version_indicator(self):
         """Tray tooltip + window title show whether the files still match the current version."""
         try:
@@ -1105,6 +1235,8 @@ class MainWindow(QMainWindow):
         self.tray.setToolTip(f"{APP_NAME} — {state}{txt}")
         self.tray_version_action.setText(f"Version status: {txt}")
         self.setWindowTitle(f"{APP_NAME} — {self.repo.machine}{' (remote)' if self.remote else ''} — {txt}")
+        glyph = "warning" if (ver and mm) else ("check" if ver else "tag")
+        self.update_statusbar(f"{self._glyph(glyph)} {html.escape(txt)}")
         prev = getattr(self, "_last_mismatch_count", None)
         self._last_mismatch_count = len(mm)
         if ver and prev == 0 and mm and self.repo.get("notify_version_drift") != "0":
@@ -1399,6 +1531,8 @@ class MainWindow(QMainWindow):
         while self.quick_grid.count():
             wdg = self.quick_grid.takeAt(0).widget()
             if wdg:
+                wdg.hide()
+                wdg.setParent(None)
                 wdg.deleteLater()
         rps = self.repo.restore_points()
         self.quick_info.setText("Each button restores every tracked file to how it was when the restore point was "
@@ -3112,6 +3246,7 @@ class MainWindow(QMainWindow):
         return [f"http://{h}:{port}/mcp" for h in hosts]
 
     def refresh_network(self):
+        self.update_statusbar()
         keys = net.load_keys(self.repo)
         seen = self.net_server.last_seen if self.net_server else {}
         if self.net_server:
@@ -3251,7 +3386,7 @@ class MainWindow(QMainWindow):
                              "claude_desktop_config.json (merge with what is there), then restart Claude Desktop:"))
         t = QTextEdit()
         t.setPlainText(snippet)
-        t.setFont(QFont("Consolas", 10))
+        t.setFont(theme.mono_font(10))
         lay.addWidget(t)
         b = QPushButton("Copy")
         b.clicked.connect(lambda: QApplication.clipboard().setText(snippet))
@@ -3276,6 +3411,7 @@ class MainWindow(QMainWindow):
             if self.tabs.currentWidget() is self.tab_claude and self.isVisible():
                 self.refresh_claude()
         self.tabs.setTabText(self.tabs.indexOf(self.tab_claude), f"Claude ({len(pend)})" if pend else "Claude")
+        self.sync_activity()
 
     def review_selected_proposal(self):
         ids = selected_data(self.prop_table)
@@ -3402,6 +3538,13 @@ class MainWindow(QMainWindow):
         self.upd_token.setPlaceholderText("Only needed while the GitHub repository is private (read-only token)")
         self.upd_token.editingFinished.connect(lambda: self.set_pref("github_token", self.upd_token.text().strip()))
         form.addRow("GitHub access token", self.upd_token)
+        self.theme_combo = QComboBox()
+        for label, val in (("Dark (VS Code Dark Modern)", "dark"), ("Light (VS Code Light Modern)", "light"),
+                           ("Follow the system setting", "system")):
+            self.theme_combo.addItem(label, val)
+        self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(theme.saved_choice())))
+        self.theme_combo.currentIndexChanged.connect(self.change_theme)
+        form.addRow("Theme", self.theme_combo)
         self.probe_spin = QSpinBox()
         self.probe_spin.setRange(1, 1440)
         self.probe_spin.setSuffix(" min")
@@ -3432,6 +3575,10 @@ class MainWindow(QMainWindow):
             d = {}
         d[key] = str(value)
         p.write_text(json.dumps(d, indent=2), encoding="utf-8")
+
+    def change_theme(self, _i=None):
+        theme.save_choice(self.theme_combo.currentData())
+        QMessageBox.information(self, APP_NAME, "The new theme is used the next time the app starts.")
 
     def connect_other_sim(self):
         win = open_connect_dialog(self)

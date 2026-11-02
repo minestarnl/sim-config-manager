@@ -25,6 +25,7 @@ recorded, you can see exactly what changed, and you can put everything back with
 - **System info** tracked like files — GPU driver, Windows build, sim software versions, displays, hardware
 - Compare and copy configs between sims · rebuild a reinstalled PC from the backup · changelog export (Notion / Sheets)
 - Finds Prepar3D and ProSim config files automatically
+- VS Code–style interface (dark, light or follow the system) — the same on Windows and Mac
 - Tray app, starts with Windows (as administrator), installer + in-app updates
 
 
@@ -375,6 +376,14 @@ The app was renamed in 1.4. Quit the old *SimConfigKeeper* from the tray, then s
 * Sync never conflicts: each PC writes only its own `machines\<name>.json`; file versions are stored
   by content hash. Changing a PC's name starts a new manifest (the old one stays as a backup).
 * Rename `Sim 1` / `Sim 2` in Settings *before* setting up sync.
+
+## Credits
+
+* Icons: [Codicons](https://github.com/microsoft/vscode-codicons) by Microsoft, licensed under
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) (bundled unmodified in `simconfigmanager/assets`).
+* The look is inspired by Visual Studio Code's Dark Modern / Light Modern themes. This project is not affiliated
+  with Visual Studio Code or Microsoft.
+* Built with [Qt for Python (PySide6)](https://doc.qt.io/qtforpython/).
 
 ## Disclaimer
 

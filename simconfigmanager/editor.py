@@ -11,22 +11,17 @@ from PySide6.QtCore import QRect, QRegularExpression, QSize, Qt, QTimer
 from PySide6.QtGui import (QAction, QColor, QFont, QKeySequence, QPainter, QSyntaxHighlighter, QTextCharFormat,
                            QTextCursor, QTextDocument, QTextFormat, QShortcut)
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout,
-                               QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-                               QMessageBox, QPlainTextEdit, QPushButton, QTextEdit, QToolBar, QVBoxLayout,
+                               QInputDialog, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+                               QMessageBox, QPlainTextEdit, QPushButton, QToolBar, QVBoxLayout,
                                QWidget)
 
-from . import core
+from . import core, theme
 from .core import APP_NAME, Repo, TrackedFile
+from .theme import TLabel as QLabel, TTextEdit as QTextEdit  # theme-aware versions
 
-# --------------------------------------------------------------------------- colours (light theme)
+# --------------------------------------------------------------------------- colours (follow the app theme)
 
-PALETTE = {
-    "bg": "#ffffff", "fg": "#1e1e1e", "gutter_bg": "#f3f3f3", "gutter_fg": "#999999",
-    "current_line": "#fffbdd", "comment": "#6a9955", "section": "#0000c0", "key": "#0451a5",
-    "value": "#a31515", "number": "#098658", "bool": "#0000ff", "operator": "#555555",
-    "tag": "#800000", "attr": "#e50000", "string": "#a31515", "decl": "#7a3e9d", "entity": "#b5651d",
-    "error_bg": "#ffd7d7", "find_bg": "#ffe680",
-}
+PALETTE = theme.EDITOR   # VS Code Dark+ / Light+ syntax colours, filled by theme.init()
 
 
 def fmt(color: str, bold: bool = False, italic: bool = False) -> QTextCharFormat:
@@ -122,7 +117,7 @@ class XmlHighlighter(QSyntaxHighlighter):
         self.f_str = fmt(PALETTE["string"])
         self.f_decl = fmt(PALETTE["decl"])
         self.f_entity = fmt(PALETTE["entity"])
-        self.f_text = fmt(PALETTE["fg"], bold=True)
+        self.f_text = fmt(PALETTE["text"], bold=True)
         self.re_tag = QRegularExpression(r"</?[\w:.\-]+|/?>")
         self.re_attr = QRegularExpression(r"[\w:.\-]+(?=\s*=)")
         self.re_str = QRegularExpression(r"\"[^\"]*\"|'[^']*'")
@@ -214,14 +209,15 @@ class LineNumberArea(QWidget):
 class CodeEditor(QPlainTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
-        font = QFont("Consolas")
+        font = theme.mono_font(11)
         font.setStyleHint(QFont.Monospace)
         font.setPointSize(11)
         self.setFont(font)
         self.setTabStopDistance(self.fontMetrics().horizontalAdvance(" ") * 4)
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.setStyleSheet(f"QPlainTextEdit {{ background:{PALETTE['bg']}; color:{PALETTE['fg']}; "
-                           "selection-background-color:#add6ff; selection-color:#000; }")
+        self.setStyleSheet(f"QPlainTextEdit {{ background:{PALETTE['bg']}; color:{PALETTE['fg']}; border:none; "
+                           f"border-radius:0; selection-background-color:{PALETTE['selection']}; "
+                           f"selection-color:{PALETTE['fg']}; }}")
         self.gutter = LineNumberArea(self)
         self.error_lines: set[int] = set()
         self.find_term = ""
@@ -265,8 +261,8 @@ class CodeEditor(QPlainTextEdit):
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
                 if (num + 1) in self.error_lines:
-                    p.fillRect(0, top, self.gutter.width(), h, QColor("#ff8a80"))
-                p.setPen(QColor("#333333" if num == cur else PALETTE["gutter_fg"]))
+                    p.fillRect(0, top, self.gutter.width(), h, QColor(PALETTE["error_gutter"]))
+                p.setPen(QColor(PALETTE["gutter_fg_active"] if num == cur else PALETTE["gutter_fg"]))
                 p.drawText(0, top, self.gutter.width() - 6, h, Qt.AlignRight, str(num + 1))
             block = block.next()
             top = bottom
@@ -449,7 +445,7 @@ class SaveDialog(QDialog):
         lay.addWidget(QLabel("These changes will be written to the file:"))
         view = QTextEdit()
         view.setReadOnly(True)
-        view.setFont(QFont("Consolas", 10))
+        view.setFont(theme.mono_font(10))
         import html as _h
         out = []
         for ln in diff.splitlines():
@@ -690,7 +686,7 @@ class EditorWindow(QMainWindow):
         for ln, msg in probs:
             it = QListWidgetItem(f"Line {ln}: {msg}")
             it.setData(Qt.UserRole, ln)
-            it.setForeground(QColor("#b71c1c"))
+            it.setForeground(QColor(theme.c("#b71c1c")))
             self.problems.addItem(it)
         self.problems.setVisible(bool(probs))
         if announce:
