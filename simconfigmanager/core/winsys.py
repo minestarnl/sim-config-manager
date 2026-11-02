@@ -64,20 +64,47 @@ def ps_quote(s: str) -> str:
 
 # --------------------------------------------------------------------------- GPU
 
+_NVML: dict = {}
+_SMI_CACHE: list = [0.0, None]
+
+
 def gpu_stats() -> Optional[dict]:
-    """{'temp': °C, 'util': %, 'mem_used': MB, 'name': str} for the first NVIDIA GPU, or None."""
+    """{'temp': °C, 'util': %, 'mem_used': MB, 'name': str} for the first NVIDIA GPU, or None.
+    Uses the NVIDIA driver library directly (NVML: no extra process, microseconds); falls back to nvidia-smi at
+    most once a minute."""
     if "gpu" in FAKES:
         return _fake("gpu")
-    exe = "nvidia-smi"
-    out = run([exe, "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used",
+    if _NVML.get("ok") is not False:
+        try:
+            import pynvml
+            if not _NVML.get("ok"):
+                pynvml.nvmlInit()
+                _NVML["h"] = pynvml.nvmlDeviceGetHandleByIndex(0)
+                name = pynvml.nvmlDeviceGetName(_NVML["h"])
+                _NVML["name"] = name.decode() if isinstance(name, bytes) else name
+                _NVML["ok"] = True
+            h = _NVML["h"]
+            return {"name": _NVML["name"],
+                    "temp": float(pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)),
+                    "util": float(pynvml.nvmlDeviceGetUtilizationRates(h).gpu),
+                    "mem_used": pynvml.nvmlDeviceGetMemoryInfo(h).used / 1048576}
+        except Exception:  # noqa: BLE001 - no NVIDIA GPU / driver / package
+            _NVML["ok"] = False
+    import time as _t
+    if _t.time() - _SMI_CACHE[0] < 60:
+        return _SMI_CACHE[1]
+    _SMI_CACHE[0] = _t.time()
+    out = run(["nvidia-smi", "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used",
                "--format=csv,noheader,nounits"], timeout=10)
-    if not out:
-        return None
-    try:
-        name, temp, util, mem = [x.strip() for x in out.strip().splitlines()[0].split(",")[:4]]
-        return {"name": name, "temp": float(temp), "util": float(util), "mem_used": float(mem)}
-    except (ValueError, IndexError):
-        return None
+    res = None
+    if out:
+        try:
+            name, temp, util, mem = [x.strip() for x in out.strip().splitlines()[0].split(",")[:4]]
+            res = {"name": name, "temp": float(temp), "util": float(util), "mem_used": float(mem)}
+        except (ValueError, IndexError):
+            res = None
+    _SMI_CACHE[1] = res
+    return res
 
 
 # --------------------------------------------------------------------------- event log

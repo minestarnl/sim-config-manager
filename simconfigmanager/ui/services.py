@@ -1,7 +1,14 @@
 """Background work on the sim PC itself: sessions, hardware watchdog, health, 'who changed it', templates.
 
-Every job runs on the writable background worker (MainWindow.run_bg(write=True)), so the UI never waits for
-PowerShell, nvidia-smi or the event log. In remote mode none of this runs here — the sim does it.
+Kept as light as possible so it never costs the sim frame rate:
+* every job runs on a background worker; helper programs (PowerShell …) run at below-normal priority;
+* while the sim program runs ("quiet while flying", on by default) only the cheap things happen: file checks
+  (a stat per file), a session sample every 10 s (one small file read, GPU via the driver library), and the
+  hardware check — which is only triggered when Windows reports a device was plugged in or out.
+  System information, health and template checks wait until the sim has closed;
+* the hardware watchdog doesn't poll: it reacts to Windows device-change messages, with a check every 10 min
+  as a fallback.
+In remote mode none of this runs here — the sim does it.
 """
 from __future__ import annotations
 
@@ -9,8 +16,8 @@ from PySide6.QtCore import QTimer
 
 from .. import core
 
-SESSION_SECONDS = 5
-HARDWARE_SECONDS = 30
+SESSION_SECONDS = 10
+HARDWARE_SECONDS = 600       # fallback; device changes trigger a check right away
 HEALTH_MINUTES = 15
 TEMPLATE_MINUTES = 10
 
@@ -32,10 +39,22 @@ class SimServices:
             t.timeout.connect(fn)
             t.start(secs * 1000)
             setattr(self, f"_{name}_timer", t)
+        self._hw_debounce = QTimer(self)
+        self._hw_debounce.setSingleShot(True)
+        self._hw_debounce.timeout.connect(self.service_hardware)
+        install_device_change_filter(self)
         QTimer.singleShot(4000, self.service_sessions)
         QTimer.singleShot(6000, self.service_hardware)
         QTimer.singleShot(45_000, self.service_health)
         QTimer.singleShot(60_000, self.service_templates)
+
+    def flying(self) -> bool:
+        """The sim program is running and 'quiet while flying' is on: postpone everything that isn't needed."""
+        return bool(self.live.get("running")) and self.repo.get("quiet_while_flying") != "0"
+
+    def device_changed(self):
+        """Windows reported a device change (USB plugged in/out): check the cockpit hardware in 3 s."""
+        self._hw_debounce.start(3000)
 
     def _job(self, name: str, fn, done=None):
         """One run at a time per service."""
@@ -57,7 +76,10 @@ class SimServices:
     def service_sessions(self):
         def done(state):
             before = (self.live.get("session") or {}).get("id"), (self.live.get("benchmark") or {}).get("id")
+            was_flying = self.flying()
             self.live = state
+            if was_flying and not self.flying():
+                QTimer.singleShot(20_000, self.catch_up)   # run what was postponed during the session
             after = (state.get("session") or {}).get("id"), (state.get("benchmark") or {}).get("id")
             if before[1] and not after[1]:
                 self.notify("Benchmark finished — see the Sessions page")
@@ -80,8 +102,15 @@ class SimServices:
                 self.refresh_hardware_devices(st)
         self._job("hardware", lambda r: r.hardware_check(), done)
 
+    def catch_up(self):
+        self.service_health()
+        self.service_templates()
+        self.refresh_probes_bg()
+
     # ---------------------------------------------------------------- health (#14)
-    def service_health(self):
+    def service_health(self, force: bool = False):
+        if self.flying() and not force:
+            return
         def done(res):
             new = set(res.get("warnings", [])) - set(getattr(self, "_health_warnings", []))
             self._health_warnings = res.get("warnings", [])
@@ -93,6 +122,8 @@ class SimServices:
 
     # ---------------------------------------------------------------- templates (#9)
     def service_templates(self):
+        if self.flying():
+            return
         def done(waiting):
             names = sorted(t["name"] for t in waiting)
             if names and names != getattr(self, "_tpl_waiting", []):
@@ -123,3 +154,28 @@ class SimServices:
         n = sum(1 for f in self.repo.files() if not core.is_probe(f))
         if str(n) != self.repo.get("audit_files"):
             self._job("audit", lambda r: r.enable_file_auditing())
+
+
+def install_device_change_filter(win) -> None:
+    """Call win.device_changed() when Windows broadcasts WM_DEVICECHANGE (no polling)."""
+    import sys
+    if sys.platform != "win32":
+        return
+    from PySide6.QtCore import QAbstractNativeEventFilter, QCoreApplication
+    import ctypes.wintypes
+
+    class _Filter(QAbstractNativeEventFilter):
+        def nativeEventFilter(self, event_type, message):  # noqa: N802
+            try:
+                et = event_type.data() if hasattr(event_type, "data") else event_type
+                if et in (b"windows_generic_MSG", "windows_generic_MSG"):
+                    msg = ctypes.wintypes.MSG.from_address(int(message))
+                    if msg.message == 0x0219:        # WM_DEVICECHANGE (DBT_DEVNODES_CHANGED, arrival, removal)
+                        win.device_changed()
+            except Exception:  # noqa: BLE001
+                pass
+            return False, 0
+
+    win._device_filter = _Filter()
+    QCoreApplication.instance().installNativeEventFilter(win._device_filter)
+    win.winId()   # the (hidden) main window needs a native window to receive the broadcast

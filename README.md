@@ -536,6 +536,25 @@ python SimConfigManager.pyw --no-elevate --data .\testdata  # run with a throw-a
   runner). Screenshots: `QT_QPA_PLATFORM=offscreen python tools/make_screenshots.py` and
   `python tools/hub_screenshots.py`.
 
+## Impact on the sim
+
+The app is built to stay out of the sim's way:
+
+* It runs at **below-normal priority**, and so does every helper it starts (PowerShell, nvidia-smi), so Windows
+  always gives Prepar3D and ProSim the CPU first.
+* **File checks** every 5 s only look at each file's size and date (well under a millisecond for 25 files);
+  a file is only read when it actually changed.
+* **While the sim runs** ("quiet while flying", Settings → This sim, on by default): one session sample every
+  10 s (a small file written by the bridge, GPU temperature read straight from the NVIDIA driver, and a check
+  that the sim's process still exists). System information, health and template checks wait until the sim
+  closes.
+* The **hardware watchdog doesn't poll**: it checks when Windows reports a device was plugged in or out (plus a
+  fallback every 10 minutes).
+* The **live-data bridge** inside Prepar3D reads a handful of values once a second and writes a 200-byte file
+  every 5 seconds.
+* Heavy jobs (integrity manifests, install recordings, archives) only run when you start them, and the app
+  asks first when the sim is running.
+
 ## Notes
 
 * Data lives in `C:\ProgramData\SimConfigManager` (SQLite + compressed copies of every version). Installs

@@ -326,8 +326,8 @@ class FilesPage:
         self.refresh_files()
 
     def refresh_probes_bg(self):
-        if self.remote:
-            return
+        if self.remote or (hasattr(self, "flying") and self.flying()):
+            return   # system information is read again after the session
         due = self.repo.probe_due()
         if not due or getattr(self, "_probing", False):
             return

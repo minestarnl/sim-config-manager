@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import statistics
 import sys
 from pathlib import Path
@@ -35,26 +36,32 @@ CREATE TABLE IF NOT EXISTS sessions (
     snapshot_id INTEGER, aircraft TEXT DEFAULT '', start_pos TEXT DEFAULT '', end_pos TEXT DEFAULT '',
     stats TEXT DEFAULT '{}', crash TEXT DEFAULT '', note TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS session_samples (
-    session_id INTEGER, ts REAL, fps REAL, gpu_temp REAL, gpu_util REAL, aircraft TEXT, lat REAL, lon REAL,
+    session_id INTEGER, ts REAL, fps REAL, fps_min REAL, gpu_temp REAL, gpu_util REAL, aircraft TEXT, lat REAL, lon REAL,
     alt REAL, paused INTEGER);
 CREATE INDEX IF NOT EXISTS idx_samples_session ON session_samples(session_id, ts);
 """)
 
 DEFAULT_SIM_EXE = "Prepar3D.exe"
-LIVE_MAX_AGE = 10          # seconds before the bridge's data counts as stale
+LIVE_MAX_AGE = 20          # seconds before the bridge's data counts as stale (the bridge writes every 5 s)
 
 # --------------------------------------------------------------------------- FSUIPC Lua bridge
 
 LUA_NAME = "SimConfigManager"
 LUA_BRIDGE = r"""-- Sim Config Manager bridge (installed by Sim Config Manager; safe to delete).
--- Writes live data for the app once a second. Read-only: it never changes anything in the sim.
+-- Read-only: it never changes anything in the sim. Reads the frame rate once a second and writes a small
+-- summary (average and lowest fps of the last few seconds, aircraft, position) every 5 seconds.
 local OUT = [[__OUT__]]
+local n, sum, low = 0, 0, 999
 local function esc(s) return (string.gsub(s or "", '[%c"\\]', function(c)
   if c == '"' then return '\\"' elseif c == '\\' then return '\\\\' else return ' ' end end)) end
 function scm_tick(t)
   local raw = ipc.readUW(0x0274)
-  local fps = 0
-  if raw and raw > 0 then fps = 32768 / raw end
+  if raw and raw > 0 then
+    local fps = 32768 / raw
+    n = n + 1; sum = sum + fps
+    if fps < low then low = fps end
+  end
+  if n < 5 then return end
   local lat = ipc.readDD(0x0560) * 90.0 / (10001750.0 * 65536.0 * 65536.0)
   local lon = ipc.readDD(0x0568) * 360.0 / (65536.0 * 65536.0 * 65536.0 * 65536.0)
   local alt = ipc.readDD(0x0570) / (65536.0 * 65536.0) * 3.28084
@@ -63,13 +70,14 @@ function scm_tick(t)
   title = string.match(title, "^[^%z]*")
   local f = io.open(OUT .. ".tmp", "w")
   if f then
-    f:write(string.format('{"ts":%d,"fps":%.1f,"lat":%.6f,"lon":%.6f,"alt_ft":%.0f,"gs_kt":%.0f,' ..
-      '"on_ground":%d,"paused":%d,"aircraft":"%s"}', os.time(), fps, lat, lon, alt, gs,
+    f:write(string.format('{"ts":%d,"fps":%.1f,"fps_min":%.1f,"lat":%.6f,"lon":%.6f,"alt_ft":%.0f,' ..
+      '"gs_kt":%.0f,"on_ground":%d,"paused":%d,"aircraft":"%s"}', os.time(), sum / n, low, lat, lon, alt, gs,
       ipc.readUW(0x0366), ipc.readUW(0x0264), esc(title)))
     f:close()
     os.remove(OUT)
     os.rename(OUT .. ".tmp", OUT)
   end
+  n, sum, low = 0, 0, 999
 end
 event.timer(1000, "scm_tick")
 """
@@ -220,11 +228,16 @@ def start_session(repo, kind: str = "session", label: str = "", minutes: float =
 
 
 def add_sample(repo, s: dict, live: Optional[dict], gpu: Optional[dict]) -> None:
-    repo.db.execute("INSERT INTO session_samples(session_id, ts, fps, gpu_temp, gpu_util, aircraft, lat, lon, alt, "
-                    "paused) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    (s["id"], now_ts(), (live or {}).get("fps"), (gpu or {}).get("temp"), (gpu or {}).get("util"),
-                     (live or {}).get("aircraft"), (live or {}).get("lat"), (live or {}).get("lon"),
-                     (live or {}).get("alt_ft"), int(bool((live or {}).get("paused")))))
+    sql = ("INSERT INTO session_samples(session_id, ts, fps, fps_min, gpu_temp, gpu_util, aircraft, lat, lon, alt, "
+           "paused) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+    args = (s["id"], now_ts(), (live or {}).get("fps"), (live or {}).get("fps_min"), (gpu or {}).get("temp"),
+            (gpu or {}).get("util"), (live or {}).get("aircraft"), (live or {}).get("lat"), (live or {}).get("lon"),
+            (live or {}).get("alt_ft"), int(bool((live or {}).get("paused"))))
+    try:
+        repo.db.execute(sql, args)
+    except sqlite3.OperationalError:          # store from 1.12: add the column once
+        repo.db.execute("ALTER TABLE session_samples ADD COLUMN fps_min REAL")
+        repo.db.execute(sql, args)
     if live and live.get("aircraft") and not s.get("aircraft"):
         repo.db.execute("UPDATE sessions SET aircraft=?, start_pos=? WHERE id=?",
                         (live["aircraft"], _pos(live), s["id"]))
@@ -233,15 +246,15 @@ def add_sample(repo, s: dict, live: Optional[dict], gpu: Optional[dict]) -> None
 
 def compute_stats(samples: list[dict], started: float, ended: float) -> dict:
     fps = [x["fps"] for x in samples if x.get("fps") and not x.get("paused")]
+    lows = [x.get("fps_min") or x["fps"] for x in samples if x.get("fps") and not x.get("paused")]
     temps = [x["gpu_temp"] for x in samples if x.get("gpu_temp") is not None]
     utils = [x["gpu_util"] for x in samples if x.get("gpu_util") is not None]
     st: dict = {"minutes": round((ended - started) / 60, 1), "samples": len(samples)}
     if fps:
-        srt = sorted(fps)
         med = statistics.median(fps)
         st.update(avg_fps=round(statistics.fmean(fps), 1), median_fps=round(med, 1),
-                  low1_fps=round(srt[max(0, int(len(srt) * 0.01) - 1)], 1), min_fps=round(srt[0], 1),
-                  stutters=sum(1 for v in fps if v < med * 0.5))
+                  low1_fps=round(sorted(lows)[max(0, int(len(lows) * 0.01) - 1)], 1), min_fps=round(min(lows), 1),
+                  stutters=sum(1 for v in lows if v < med * 0.5))
     if temps:
         st.update(max_gpu_temp=max(temps), avg_gpu_temp=round(statistics.fmean(temps), 1))
     if utils:
@@ -289,7 +302,7 @@ def end_session(repo, s: dict, sim_exe: str = DEFAULT_SIM_EXE) -> dict:
 def session_tick(repo, gpu: Optional[dict] = None) -> dict:
     """Called every few seconds on the sim PC: starts/ends sessions and benchmarks, records samples."""
     sim_exe = repo.get("session_process") or DEFAULT_SIM_EXE
-    running = bool(repo.running_processes_named([sim_exe]))
+    running = sim_running(repo, sim_exe)
     live = repo.live_data()
     gpu = gpu if gpu is not None else winsys.gpu_stats()
     s = open_session(repo)
@@ -385,6 +398,32 @@ def compare_benchmarks(repo, ids: list[int]) -> list[dict]:
                         "version": b["version_number"], "matches": bool(b["version_matches"]),
                         "differing": b["differing"], "snapshot_id": b["snapshot_id"], **(b["stats"] or {})})
     return out
+
+
+_SIM_PID: dict = {}
+
+
+def sim_running(repo, exe: str) -> bool:
+    """Is the sim program running? While it runs, only its process id is checked (no process list)."""
+    if "processes" in winsys.FAKES:
+        return bool(repo.running_processes_named([exe]))
+    try:
+        import psutil
+    except ImportError:
+        return False
+    pid = _SIM_PID.get(exe.lower())
+    if pid:
+        try:
+            if psutil.Process(pid).name().lower() == exe.lower():
+                return True
+        except (psutil.Error, OSError):
+            pass
+        _SIM_PID.pop(exe.lower(), None)
+    for p in psutil.process_iter(["name"]):
+        if (p.info.get("name") or "").lower() == exe.lower():
+            _SIM_PID[exe.lower()] = p.pid
+            return True
+    return False
 
 
 @repo_method

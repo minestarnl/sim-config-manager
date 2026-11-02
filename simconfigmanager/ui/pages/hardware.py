@@ -61,7 +61,7 @@ class HardwarePage:
         bl.addWidget(self.proj_table)
         bl.addLayout(button_row(("Add projector…", lambda: self.edit_projector(new=True)),
                                 ("Edit…", self.edit_projector), ("Remove…", self.remove_projector),
-                                trailing=[("Check now", self.service_health, {"icon": "refresh"})]))
+                                trailing=[("Check now", lambda: self.service_health(force=True), {"icon": "refresh"})]))
         lay.addWidget(box)
 
         box, bl = section("Maintenance schedule")

@@ -41,6 +41,14 @@ def main():
     if args.remote:
         return run_remote()
 
+    # the sim comes first: this app (and everything it starts) runs below normal priority
+    try:
+        import psutil
+        if sys.platform == "win32":
+            psutil.Process().nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+    except Exception:  # noqa: BLE001
+        pass
+
     # Files under Program Files / ProgramData can only be restored with admin rights, so the sim's own app asks
     # for them (UAC prompt). At logon it starts through the scheduled task, which already has them.
     if sys.platform == "win32" and not core.is_admin() and not args.no_elevate:

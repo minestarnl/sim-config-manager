@@ -55,6 +55,11 @@ class SettingsPage:
         cbv.setChecked(self.repo.get("notify_version_drift") != "0")
         cbv.toggled.connect(lambda v: self.repo.set("notify_version_drift", "1" if v else "0"))
         form.addRow("", cbv)
+        quiet = QCheckBox("Quiet while flying: postpone system information, health and template checks while the sim "
+                          "runs (recommended)")
+        quiet.setChecked(self.repo.get("quiet_while_flying") != "0")
+        quiet.toggled.connect(lambda v: self.repo.set("quiet_while_flying", "1" if v else "0"))
+        form.addRow("", quiet)
         self.audit_cb = QCheckBox("Record which program and Windows user changed a file (Windows file auditing)")
         self.audit_cb.setChecked(self.repo.get("audit_enabled") == "1")
         self.audit_cb.setToolTip("Shown as 'Changed by' in a file's revisions and in the event log")

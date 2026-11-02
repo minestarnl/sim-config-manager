@@ -150,6 +150,11 @@ class InstallsPage:
 
     # ---------------------------------------------------------------- installs
     def _bg_action(self, what: str, fn, done):
+        if (getattr(self, "live", {}) or {}).get("running") and not confirm(
+                self, "The sim is running.", "Continue anyway",
+                details="Scanning big folders reads every file and uses disk and CPU time. Best done when the sim "
+                        "is not in use."):
+            return
         self.statusBar().showMessage(f"{what}… (this can take a few minutes for big folders)")
 
         def failed(e):

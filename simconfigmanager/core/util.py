@@ -17,7 +17,7 @@ from typing import Optional
 
 APP_NAME = "SimConfigManager"          # technical name: folders, executables, connector
 APP_TITLE = "Sim Config Manager"       # name shown to people
-APP_VERSION = "1.12.1"
+APP_VERSION = "1.12.2"
 LEGACY_NAMES = ("SimConfigKeeper",)   # earlier name of this app (≤ 1.3)
 
 
@@ -175,7 +175,9 @@ def write_file_atomic(path: str, data: bytes) -> None:
     os.replace(tmp, p)
 
 def _no_window():
-    return {"creationflags": 0x08000000} if sys.platform == "win32" else {}  # CREATE_NO_WINDOW
+    """Flags for helper programs (PowerShell, nvidia-smi …): no console window, below-normal priority so they
+    never compete with the sim for CPU time."""
+    return {"creationflags": 0x08000000 | 0x00004000} if sys.platform == "win32" else {}
 
 
 __all__ = ['APP_TITLE', '_no_window', 'APP_NAME', 'APP_VERSION', 'LEGACY_NAMES', 'default_data_dir', 'now_ts', 'fmt_ts', 'sha256_bytes', 'is_binary', 'decode_text', 'TextFormat', 'detect_text', 'encode_text', 'validate_text', 'read_file_bytes', 'write_file_atomic']
