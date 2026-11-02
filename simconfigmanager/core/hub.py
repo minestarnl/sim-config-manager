@@ -29,7 +29,43 @@ def build_hub_report(repo) -> dict:
     st["restore_points"] = [r.name for r in repo.restore_points()]
     st["events"] = [{"ts": e["ts"], "level": e["level"], "message": e["message"]} for e in repo.events(30)]
     st["host"] = {"hostname": socket.gethostname(), "os": platform.platform(), "admin": is_admin()}
+    for key, fn in (
+            ("sessions", lambda: [{k: x[k] for k in ("id", "kind", "label", "started", "ended", "version_number",
+                                                      "version_matches", "aircraft", "stats", "crash")}
+                                  for x in repo.sessions(15)]),
+            ("performance", lambda: repo.performance_by_version()),
+            ("hardware", lambda: [{"label": r["label"], "ok": r["ok"], "device": (r.get("device") or {}).get("name"),
+                                   "note": r.get("note", "")} for r in repo.hardware_status().get("required", [])]),
+            ("health", lambda: {k: v for k, v in repo.health_status().items() if k != "ts"}),
+            ("maintenance", lambda: [{k: t.get(k) for k in ("id", "name", "every_days", "every_hours", "last_done",
+                                                             "due_in_days", "due_in_hours", "due_date", "state",
+                                                             "note")} for t in repo.maintenance_tasks()]),
+            ("manifests", lambda: [{"name": m["name"], "created": m["created"], "files": m["files"],
+                                    "last_check": {k: (m["last_check"] or {}).get(k) for k in ("ts", "ok", "counts")}
+                                    if m["last_check"] else None} for m in repo.manifests()]),
+            ("installs", lambda: [{"name": i["name"], "started": i["started"], "status": i["status"],
+                                   "counts": i["summary"].get("counts", {})} for i in repo.installs()[:10]])):
+        try:
+            st[key] = fn()
+        except Exception:  # noqa: BLE001 - optional sections
+            pass
     return st
+
+
+def apply_hub_commands(repo, commands: list) -> list[str]:
+    """Things a technician did on the Hub (e.g. from the phone page) that the sim has to record."""
+    done = []
+    for c in commands or []:
+        try:
+            if c.get("type") == "maintenance_done":
+                repo.maintenance_done(int(c["task"]), c.get("by", ""), c.get("note", "") + " (via the Hub)")
+                done.append(c.get("id"))
+            elif c.get("type") == "note":
+                repo.log(f"[Hub] {c.get('by', '')}: {c.get('text', '')}")
+                done.append(c.get("id"))
+        except Exception as e:  # noqa: BLE001
+            repo.log(f"Could not apply a Hub command ({c.get('type')}): {e}", level="warning")
+    return [d for d in done if d]
 
 
 def hub_push(repo, url: Optional[str] = None, key: Optional[str] = None, timeout: float = 20) -> dict:
@@ -48,7 +84,10 @@ def hub_push(repo, url: Optional[str] = None, key: Optional[str] = None, timeout
         "User-Agent": f"{APP_NAME}/{APP_VERSION}"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read() or b"{}")
+            res = json.loads(r.read() or b"{}")
+        if res.get("commands") and not repo.read_only:
+            res["applied"] = apply_hub_commands(repo, res["commands"])
+        return res
     except urllib.error.HTTPError as e:
         try:
             msg = json.loads(e.read()).get("error", "")
@@ -63,10 +102,10 @@ def hub_signature(repo) -> tuple:
     """Changes when anything worth reporting changed (new snapshot or event)."""
     snap = repo.latest_snapshot()
     ev = repo.events(1)
-    return (snap.id if snap else 0, ev[0]["id"] if ev else 0)
+    return (snap.id if snap else 0, ev[0]["id"] if ev else 0, repo.get("hw_missing"), repo.get("health_last")[:40])
 
 
 for _n, _f in (("build_hub_report", build_hub_report), ("hub_signature", hub_signature)):
     setattr(Repo, _n, _f)
 
-__all__ = ['build_hub_report', 'hub_push', 'hub_signature']
+__all__ = ['build_hub_report', 'hub_push', 'hub_signature', 'apply_hub_commands']

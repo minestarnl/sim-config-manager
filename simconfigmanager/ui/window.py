@@ -32,12 +32,18 @@ from .pages.sharing import SharingPage
 from .pages.versions import VersionsPage
 from .common import make_icon, make_icon_remote
 from .pages import Page
+from .pages.sessions import SessionsPage
+from .pages.hardware import HardwarePage
+from .pages.installs import InstallsPage
+from .pages.templates import TemplatesPage
+from .services import SimServices
 
-PAGE_ORDER = (FleetPage, VersionsPage, RestorePointsPage, FilesPage, HistoryPage, RulebookPage, AlertsPage,
-              SharingPage, AssistantsPage, SettingsPage)   # activity bar order; Settings sits at the bottom
+PAGE_ORDER = (FleetPage, VersionsPage, RestorePointsPage, FilesPage, HistoryPage, SessionsPage, HardwarePage,
+              InstallsPage, TemplatesPage, RulebookPage, AlertsPage, SharingPage, AssistantsPage,
+              SettingsPage)   # activity bar order; Settings sits at the bottom
 
 
-class MainWindow(*PAGE_ORDER, QMainWindow):
+class MainWindow(*PAGE_ORDER, SimServices, QMainWindow):
     """The main window: activity bar + one page per area. Each page is a mixin in ui/pages/."""
 
     def __init__(self, repo: Repo, start_hidden: bool = False):
@@ -93,6 +99,7 @@ class MainWindow(*PAGE_ORDER, QMainWindow):
         self.update_timer.start(3_600_000)
         if not self.remote:
             self.repo.ensure_baseline()
+        self.start_services()
         self.refresh_all()
         if not start_hidden:
             self.show()
@@ -203,6 +210,7 @@ class MainWindow(*PAGE_ORDER, QMainWindow):
             if not changes:
                 return
             alerts = self.repo.process_changes(changes)
+            self.service_attribute(changes)
         except Exception as e:  # noqa: BLE001
             self.statusBar().showMessage(f"Could not check the files: {e}")
             return
@@ -268,7 +276,7 @@ class MainWindow(*PAGE_ORDER, QMainWindow):
             spec = cls.PAGE
             b = QToolButton()
             b.setCheckable(True)
-            b.setFixedSize(48, 48)
+            b.setFixedSize(48, 44)
             b.setIconSize(QSize(24, 24))
             b.setToolTip(spec.title)
             b.setCursor(Qt.PointingHandCursor)
@@ -389,11 +397,14 @@ class MainWindow(*PAGE_ORDER, QMainWindow):
         self.show_window()
         self.go("versions")
 
-    def run_bg(self, fn, done=None, err=None):
-        """Run fn(bg_repo) on the background worker (its own read-only store connection); callbacks on the UI."""
+    def run_bg(self, fn, done=None, err=None, write: bool = False):
+        """Run fn(store) on a background worker; callbacks run on the UI thread.
+        Reads use their own read-only store connection; ``write=True`` jobs (sessions, watchdog, health …) run on
+        a second worker with a writable connection, so a slow scan never blocks the UI or the reads."""
         import concurrent.futures
-        if not hasattr(self, "_bg_pool"):
-            self._bg_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="scm-bg")
+        if not hasattr(self, "_bg_pools"):
+            self._bg_pools = {k: concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"scm-{k}")
+                              for k in ("read", "write")}
             self._bg_local = threading.local()
         data_dir = self.repo.data_dir
         remote_repo = self.repo if self.remote else None
@@ -401,11 +412,17 @@ class MainWindow(*PAGE_ORDER, QMainWindow):
         def job():
             if remote_repo is not None:
                 return fn(remote_repo)
-            r = getattr(self._bg_local, "repo", None)
+            attr = "repo_w" if write else "repo_r"
+            r = getattr(self._bg_local, attr, None)
             if r is None:
-                r = self._bg_local.repo = Repo(data_dir, read_only=True)
+                r = Repo(data_dir, read_only=not write)
+                setattr(self._bg_local, attr, r)
+                cache = getattr(self.repo, "_probe_cache", None)
+                if cache is not None:
+                    r._probe_cache = cache          # share the system-information readings
+                    r.background_probes = True
             return fn(r)
-        fut = self._bg_pool.submit(job)
+        fut = self._bg_pools["write" if write else "read"].submit(job)
 
         def poll():
             if not fut.done():
@@ -413,7 +430,7 @@ class MainWindow(*PAGE_ORDER, QMainWindow):
                 return
             e = fut.exception()
             if e is not None:
-                (err or (lambda x: self.statusBar().showMessage(f"Sync: {x}")))(e)
+                (err or (lambda x: self.statusBar().showMessage(f"Background task failed: {x}", 8000)))(e)
             elif done:
                 done(fut.result())
         QTimer.singleShot(150, poll)

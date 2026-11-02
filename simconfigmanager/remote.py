@@ -27,7 +27,7 @@ from . import core
 
 # --------------------------------------------------------------------------- encoding
 
-DATACLASSES = {c.__name__: c for c in (core.TrackedFile, core.Snapshot, core.RestorePoint, core.Version, core.Rule,
+DATACLASSES = {c.__name__: c for c in (core.TrackedFile, core.Snapshot, core.RestorePoint, core.Revision, core.Rule,
                                        core.ConfigVersion, core.VersionStatus, core.Alert, core.Change)}
 
 
@@ -93,6 +93,9 @@ ALLOWED = {
     "list_proposals", "apply_proposal", "reject_proposal", "build_status", "discover", "build_hub_report",
     "hub_signature",
 }
+
+
+ALLOWED |= core.REMOTE_METHODS   # feature modules register their store methods (core.repo.repo_method)
 
 
 class RemoteError(Exception):

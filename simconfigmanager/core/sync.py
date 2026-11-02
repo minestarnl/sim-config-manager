@@ -224,6 +224,35 @@ def build_status(repo: Repo) -> dict:
         "pending_proposals": len(list_proposals(repo, "pending")) if (repo.data_dir / "proposals").is_dir() else 0,
         "rulebook_violations": [b["label"] for b in book if b["ok"] is False],
         "system": probes,
+        **readiness_extras(repo),
     }
 
-__all__ = ['Sync', 'FolderSync', 'drive_files', '_TOKEN_PROVIDERS', 'parse_drive_folder', 'make_sync', 'build_status']
+
+def readiness_extras(repo) -> dict:
+    """Cockpit hardware, health, maintenance, integrity and the last session — for the fleet and the Hub."""
+    out: dict = {}
+    for key, fn in (("hardware_missing", lambda: repo.hardware_status().get("missing", [])),
+                    ("health_warnings", lambda: repo.health_status().get("warnings", [])),
+                    ("maintenance_overdue", lambda: [t["name"] for t in repo.maintenance_tasks()
+                                                     if t["state"] == "overdue"]),
+                    ("maintenance_soon", lambda: [t["name"] for t in repo.maintenance_tasks() if t["state"] == "soon"]),
+                    ("integrity_problems", lambda: [m["name"] for m in repo.manifests()
+                                                    if m["last_check"] and not m["last_check"]["ok"]]),
+                    ("sim_hours", lambda: repo.sim_hours())):
+        try:
+            out[key] = fn()
+        except Exception:  # noqa: BLE001 - a feature that isn't set up must never break the heartbeat
+            out[key] = [] if key != "sim_hours" else 0
+    try:
+        last = next((x for x in repo.sessions(5, "session")), None)
+        if last:
+            out["last_session"] = {"started": last["started"], "ended": last["ended"],
+                                   "version": last["version_number"], "matches": bool(last["version_matches"]),
+                                   "avg_fps": (last["stats"] or {}).get("avg_fps"),
+                                   "low1_fps": (last["stats"] or {}).get("low1_fps"),
+                                   "aircraft": last["aircraft"], "crashed": bool(last["crash"])}
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+__all__ = ['Sync', 'FolderSync', 'drive_files', '_TOKEN_PROVIDERS', 'parse_drive_folder', 'make_sync', 'build_status', 'readiness_extras']

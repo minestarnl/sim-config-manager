@@ -18,7 +18,7 @@ import traceback
 from typing import Any, Optional
 
 from . import core
-from .core import APP_NAME, APP_VERSION, Repo, TrackedFile
+from .core import APP_TITLE, APP_VERSION, Repo, TrackedFile
 
 SERVER_NAME = "sim-config-manager"
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -160,7 +160,7 @@ def as_text(data: Optional[bytes], label: str) -> str:
 def t_overview(repo: Repo, a: dict) -> str:
     ver, status = repo.version_status()
     files = repo.files()
-    out = [f"{APP_NAME} {APP_VERSION} on PC '{repo.machine}' — {len(files)} tracked files"]
+    out = [f"{APP_TITLE} {APP_VERSION} on PC '{repo.machine}' — {len(files)} tracked files"]
     groups: dict[str, int] = {}
     for f in files:
         groups[f.group or "(no group)"] = groups.get(f.group or "(no group)", 0) + 1
@@ -197,6 +197,19 @@ def t_overview(repo: Repo, a: dict) -> str:
     pend = core.list_proposals(repo, "pending")
     if pend:
         out.append(f"{len(pend)} proposed change(s) are waiting for approval in the app.")
+    extra = core.readiness_extras(repo)
+    if extra.get("hardware_missing"):
+        out.append("MISSING COCKPIT HARDWARE: " + ", ".join(extra["hardware_missing"]))
+    if extra.get("health_warnings"):
+        out.append("Health warnings: " + "; ".join(extra["health_warnings"]))
+    if extra.get("maintenance_overdue"):
+        out.append("Maintenance overdue: " + ", ".join(extra["maintenance_overdue"]))
+    if extra.get("integrity_problems"):
+        out.append("Integrity check found differences in: " + ", ".join(extra["integrity_problems"]))
+    ls = extra.get("last_session")
+    if ls:
+        out.append(f"Last session {core.fmt_ts(ls['started'])}: v{ls['version'] or '-'}, avg {ls['avg_fps'] or '-'} "
+                   f"fps, 1% low {ls['low1_fps'] or '-'}{', CRASHED' if ls['crashed'] else ''} (see `performance`)")
     return "\n".join(out)
 
 
@@ -309,8 +322,8 @@ def t_file_history(repo: Repo, a: dict) -> str:
         rows.append(f"#{v.snapshot_id}  {core.fmt_ts(v.created_at)}  {pm:>9}  "
                     f"{'(deleted) ' if v.hash is None else ''}{v.message}")
     tags = [f"{x.label} = #{x.snapshot_id}" for x in repo.versions()]
-    return (f"History of {f.display} ({len(hist)} versions, newest first). Use '#<n>' as a version in read_file "
-            f"or diff.\n" + "\n".join(rows) + ("\n\nConfiguration versions: " + ", ".join(tags) if tags else ""))
+    return (f"History of {f.display} ({len(hist)} revisions, newest first). Use '#<n>' as a version in read_file "
+            f"or diff.\n" + "\n".join(rows) + ("\n\nVersions: " + ", ".join(tags) if tags else ""))
 
 
 def t_list_versions(repo: Repo, a: dict) -> str:
@@ -443,6 +456,74 @@ def t_list_proposals(repo: Repo, a: dict) -> str:
                      for p in reversed(props)) or "No proposals yet."
 
 
+def t_performance(repo: Repo, a: dict) -> str:
+    perf = repo.performance_by_version()
+    ss = repo.sessions(int(a.get("limit") or 20), a.get("kind") or None)
+    out = ["Performance per version (sessions where every file matched that version):"]
+    for p in perf:
+        out.append(f"  {p['label']}: {p['sessions']} session(s), {p['hours']} h, avg {p['avg_fps']} fps, "
+                   f"1% low {p['low1_fps']}, {p['stutters_per_hour']} stutters/h, {p['crashes']} crash(es), "
+                   f"{p['display_resets']} display reset(s)")
+    if not perf:
+        out.append("  (no finished sessions yet)")
+    out.append("\nRecent sessions and benchmarks (newest first):")
+    for x in ss:
+        st, cr = x["stats"] or {}, x["crash"] or {}
+        what = f"benchmark '{x['label']}'" if x["kind"] == "benchmark" else "session"
+        out.append(f"  #{x['id']} {core.fmt_ts(x['started'])} {what}: {st.get('minutes', '?')} min, "
+                   f"v{x['version_number'] or '-'}{'' if x['version_matches'] else ' (files differed: ' + ', '.join(x['differing'] or []) + ')'}, "
+                   f"avg {st.get('avg_fps', '-')} fps, 1% low {st.get('low1_fps', '-')}, stutters {st.get('stutters', '-')}, "
+                   f"GPU max {st.get('max_gpu_temp', '-')} °C, aircraft {x['aircraft'] or '-'}"
+                   + (f", CRASH: {', '.join(str(c.get('module')) for c in cr.get('crashes', []))}" if cr.get("crashes") else "")
+                   + (f", {len(cr.get('display_resets', []))} display reset(s)" if cr.get("display_resets") else "")
+                   + (f" — note: {x['note']}" if x.get("note") else "") + (f" [snapshot #{x['snapshot_id']}]" if x.get("snapshot_id") else ""))
+    return "\n".join(out)
+
+
+def t_hardware_health(repo: Repo, a: dict) -> str:
+    hw = repo.hardware_status()
+    h = repo.health_status()
+    out = ["Required cockpit hardware:"]
+    out += [f"  {'OK     ' if r['ok'] else 'MISSING'} {r['label']} ({r['match']})" for r in hw.get("required", [])] \
+        or ["  (none defined)"]
+    out.append(f"Health (checked {core.fmt_ts(h['ts']) if h.get('ts') else 'never'}): " +
+               ("; ".join(h.get("warnings") or []) or "no warnings"))
+    for d in h.get("disks") or []:
+        out.append(f"  disk {d.get('name')}: {d.get('health')}, {d.get('temp')} °C, wear {d.get('wear')}%")
+    if h.get("gpu"):
+        out.append(f"  GPU {h['gpu'].get('name')}: {h['gpu'].get('temp')} °C, {h['gpu'].get('util')}% busy")
+    for p in h.get("projectors") or []:
+        out.append(f"  projector {p.get('name')}: {p.get('power') or p.get('error')}, lamp {p.get('lamp_hours')} h, "
+                   f"errors: {', '.join(p.get('errors') or []) or 'none'}")
+    out.append(f"Maintenance ({repo.sim_hours()} sim hours recorded):")
+    for t in repo.maintenance_tasks():
+        out.append(f"  {t['state'].upper():<8} {t['name']} — every {t['every_days'] or '-'} days / "
+                   f"{t['every_hours'] or '-'} sim h, last done {core.fmt_ts(t['last_done']) if t['last_done'] else 'never'}")
+    return "\n".join(out)
+
+
+def t_installs(repo: Repo, a: dict) -> str:
+    out = ["Recorded installs (newest first):"]
+    for i in repo.installs()[:20]:
+        c = i["summary"].get("counts", {})
+        out.append(f"  {core.fmt_ts(i['started'])} {i['name']}: {c.get('added', '?')} added, {c.get('changed', '?')} "
+                   f"changed, {c.get('removed', '?')} removed — {i['status']}")
+        if a.get("details"):
+            for k in ("added", "changed", "removed"):
+                out += [f"      {k}: {x['path']}" for x in (i["summary"].get(k) or [])[:60]]
+    out.append("Integrity manifests:")
+    for m in repo.manifests():
+        lc = m["last_check"]
+        out.append(f"  {m['name']} ({m['files']} files, {core.fmt_ts(m['created'])}): " +
+                   ("never verified" if not lc else "all files match" if lc["ok"] else
+                    f"{lc['counts']} — changed: {', '.join(lc.get('changed', [])[:20])}"))
+    return "\n".join(out)
+
+
+def t_manual(repo: Repo, a: dict) -> str:
+    return repo.build_manual()
+
+
 FILE = {"type": ["string", "integer"], "description": "File id, name (e.g. 'Prepar3D.cfg', 'ProSim config.xml') "
                                                       "or a unique part of its path"}
 VERSION = {"type": "string", "description": "'current' (default), a version like 'v3', a snapshot "
@@ -500,6 +581,17 @@ TOOLS = {
     "rulebook": (t_rulebook, "The settings rulebook: documented settings with notes, and LOCKED required values "
                              "(with live compliance). Check it before suggesting changes.", {}, []),
     "list_proposals": (t_list_proposals, "Proposed changes and whether they were applied, rejected or are waiting for approval.", {}, []),
+    "performance": (t_performance, "Sessions and benchmarks: frame rate (avg, 1% low, stutters), GPU temperature, "
+                                   "crashes with the faulting module, display driver resets, and performance per "
+                                   "version. Use it to judge whether a change helped.",
+                    {"kind": {"type": "string", "enum": ["session", "benchmark"]}, "limit": {"type": "integer"}}, []),
+    "hardware_health": (t_hardware_health, "Required cockpit hardware (connected or missing), disk/GPU/projector "
+                                           "health warnings and the maintenance schedule.", {}, []),
+    "installs": (t_installs, "Recorded add-on installs (what each installer added/changed/removed) and integrity "
+                             "manifest checks of the installations.",
+                 {"details": {"type": "boolean", "description": "List the files of each install"}}, []),
+    "manual": (t_manual, "The full configuration manual of this sim as Markdown (versions, files, rulebook, rules, "
+                         "hardware, maintenance, integrity, installs).", {}, []),
 }
 READ_ONLY = {k for k in TOOLS if k != "propose_change"}
 
@@ -524,6 +616,16 @@ PROMPTS = {
                         "Explain in plain language everything that changed since {version_or_current}: per file, "
                         "which settings changed, what they do, and whether any change could affect training "
                         "realism, performance or certification. Use `version_status`, `diff` and `file_history`."),
+    "autotune": ("Tune performance with benchmarks (A/B, one change at a time)",
+                 [("goal", "e.g. 'higher 1% lows on approach without losing texture quality'", True)],
+                 "Help tune this sim for: {goal}. Work in a loop, one change at a time: 1) Read `performance` "
+                 "(benchmarks and sessions), `rulebook` (locked values must stay) and the relevant settings "
+                 "(`read_file`, `search`). 2) Pick ONE change with the best expected effect and propose it with "
+                 "`propose_change`, explaining what you expect. 3) Ask the person to approve it in the app and run "
+                 "the benchmark again (Sessions → Start benchmark, same flight, same length). 4) When they say it's "
+                 "done, compare the new benchmark with the previous one in `performance`. Keep changes that helped; "
+                 "for changes that didn't, propose reverting them. Stop when the goal is met or nothing helps, and "
+                 "summarize what worked with numbers."),
     "compare_sims": ("Compare this sim with another", [("other_sim", "Name of the other sim, e.g. Sim 2", True)],
                      "Compare the configuration of this sim with {other_sim}. Use `list_other_sims`, "
                      "`compare_with_other_sim` for each relevant file, and system info. Group the differences into "

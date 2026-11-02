@@ -80,12 +80,15 @@ class RestorePoint:
 
 
 @dataclass
-class Version:
-    """One distinct version of a single file in its history."""
+class Revision:
+    """One distinct revision of a single file in its history (not to be confused with a numbered version)."""
     snapshot_id: int
     created_at: float
     message: str
     hash: Optional[str]   # None = file did not exist
+
+
+Version = Revision   # old name, kept for compatibility
 
 
 @dataclass
@@ -116,4 +119,4 @@ class Alert:
     message: str
     reverted: bool = False
 
-__all__ = ['TrackedFile', 'Snapshot', 'ConfigVersion', 'VersionStatus', 'STATUS_TEXT', 'RestorePoint', 'Version', 'Rule', 'Change', 'Alert']
+__all__ = ['TrackedFile', 'Snapshot', 'ConfigVersion', 'VersionStatus', 'STATUS_TEXT', 'RestorePoint', 'Revision', 'Version', 'Rule', 'Change', 'Alert']

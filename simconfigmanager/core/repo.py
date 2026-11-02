@@ -16,7 +16,7 @@ from typing import Iterable, Optional
 
 
 from .util import APP_NAME, default_data_dir, fmt_ts, now_ts, read_file_bytes, sha256_bytes, write_file_atomic  # noqa: F401
-from .models import Alert, Change, ConfigVersion, RestorePoint, Rule, Snapshot, TrackedFile, Version, VersionStatus  # noqa: F401
+from .models import Alert, Change, ConfigVersion, RestorePoint, Rule, Snapshot, TrackedFile, Revision, Version, VersionStatus  # noqa: F401
 from .alerts import diff_stats, evaluate_rule  # noqa: F401
 
 # --------------------------------------------------------------------------- repository
@@ -61,6 +61,35 @@ DEFAULT_SETTINGS = {
 }
 
 
+EXTRA_SCHEMA: list[str] = []      # tables of feature modules (sessions, hardware, …), see repo_method
+REMOTE_METHODS: set[str] = set()   # store methods the remote app may call (added to remote.ALLOWED)
+
+
+def repo_method(fn=None, *, remote: bool = True):
+    """Attach a module-level function ``fn(repo, ...)`` to Repo as a method (and allow it in remote mode)."""
+    def wrap(f):
+        setattr(Repo, f.__name__, f)
+        if remote:
+            REMOTE_METHODS.add(f.__name__)
+        return f
+    return wrap(fn) if fn is not None else wrap
+
+
+def schema(sql: str) -> None:
+    """Register extra tables; created when a writable store is opened."""
+    EXTRA_SCHEMA.append(sql)
+
+
+def rows(repo, sql: str, args=()) -> list:
+    """Query that returns [] when a feature's table does not exist yet (read-only connector on an old store)."""
+    try:
+        return repo.db.execute(sql, args).fetchall()
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e) or "no such column" in str(e):
+            return []
+        raise
+
+
 class Repo:
     def __init__(self, data_dir: Path | str | None = None, read_only: bool = False):
         self.data_dir = Path(data_dir) if data_dir else default_data_dir()
@@ -78,7 +107,7 @@ class Repo:
             self.obj_dir.mkdir(exist_ok=True)
             self.db = sqlite3.connect(str(self.data_dir / "repo.db"), timeout=10)
             self.db.row_factory = sqlite3.Row
-            self.db.executescript(SCHEMA)
+            self.db.executescript(SCHEMA + "".join(EXTRA_SCHEMA))
             self.db.commit()
             (self.data_dir / "proposals").mkdir(exist_ok=True)
         # in-memory stat cache: file_id -> (mtime_ns, size, hash)
@@ -443,8 +472,8 @@ class Repo:
         self.db.commit()
         return self.snapshot(sid)
 
-    def file_history(self, file_id: int) -> list[Version]:
-        """Distinct versions of one file, newest first."""
+    def file_history(self, file_id: int) -> list[Revision]:
+        """Distinct revisions of one file, newest first."""
         rows = self.db.execute(
             "SELECT s.id, s.created_at, s.message, e.hash FROM entries e JOIN snapshots s ON s.id=e.snapshot_id "
             "WHERE e.file_id=? ORDER BY s.id ASC", (file_id,)).fetchall()
@@ -452,7 +481,7 @@ class Repo:
         last = "__start__"
         for r in rows:
             if r["hash"] != last:
-                out.append(Version(r["id"], r["created_at"], r["message"], r["hash"]))
+                out.append(Revision(r["id"], r["created_at"], r["message"], r["hash"]))
                 last = r["hash"]
         return list(reversed(out))
 
@@ -868,4 +897,4 @@ from .probes import PROBE_PREFIX, is_probe, norm_path, probe_command, run_probe 
 from .rulebook_ops import rulebook_violations_for  # noqa: F401
 from .system import running_processes  # noqa: F401
 
-__all__ = ['SCHEMA', 'DEFAULT_SETTINGS', 'Repo']
+__all__ = ['EXTRA_SCHEMA', 'REMOTE_METHODS', 'repo_method', 'schema', 'rows', 'SCHEMA', 'DEFAULT_SETTINGS', 'Repo']

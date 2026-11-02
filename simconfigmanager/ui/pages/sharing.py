@@ -311,7 +311,7 @@ class SharingPage:
             if cache is not None:
                 r._probe_cache = cache          # reuse the app's system-info readings
                 r.background_probes = True
-            return core.hub_push(r, url, key)
+            return core.hub_push(r, url, key)   # may apply commands from the Hub (needs a writable store)
 
         def ok(res):
             self._hub_busy = False
@@ -326,7 +326,7 @@ class SharingPage:
             self._hub_busy = False
             self.repo.set("hub_last_error", str(e))
             self.update_hub_status()
-        self.run_bg(work, ok, fail)
+        self.run_bg(work, ok, fail, write=True)
 
     def auto_push(self):
         if self.remote:

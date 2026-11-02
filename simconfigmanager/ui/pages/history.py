@@ -37,7 +37,8 @@ class HistoryPage:
                                  ("Compare with the files on disk", self.compare_selected_snapshot),
                                  trailing=[("Export certification archive…", lambda: self.export_archive(), {"icon": "zip"}),
                                            ("Import certification archive…", self.import_archive),
-                                           ("Export changelog…", self.export_changelog)]))
+                                           ("Export changelog…", self.export_changelog),
+                                           ("Configuration manual…", self.export_manual, {"icon": "book"})]))
         split = QSplitter(Qt.Vertical)
         self.snap_table = QTableWidget()
         setup_table(self.snap_table, ["#", "When", "Kind", "PC", "Files changed", "Note"], 5)
@@ -275,3 +276,38 @@ class HistoryPage:
             fmt = "csv" if path.lower().endswith(".csv") else "md"
             Path(path).write_text(self.repo.changelog(fmt), encoding="utf-8", newline="" if fmt == "csv" else None)
             self.notify(f"Changelog saved: {path}")
+
+    def export_manual(self):
+        """Configuration manual (#13): Markdown for Notion, HTML, or PDF."""
+        name = f"{core.safe_name(self.repo.machine)}_configuration_manual"
+        path, _flt = QFileDialog.getSaveFileName(
+            self, "Export configuration manual", os.path.join(self.pref("last_archive_dir") or "", name + ".pdf"),
+            "PDF (*.pdf);;Markdown – paste into Notion (*.md);;Web page (*.html)")
+        if not path:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            md = self.repo.build_manual()
+            title = f"{self.repo.machine} — configuration manual"
+            if path.lower().endswith(".md"):
+                Path(path).write_text(md, encoding="utf-8")
+            elif path.lower().endswith((".html", ".htm")):
+                Path(path).write_text(core.markdown_to_html(md, title), encoding="utf-8")
+            else:
+                from PySide6.QtGui import QPageSize, QPdfWriter, QTextDocument
+                if not path.lower().endswith(".pdf"):
+                    path += ".pdf"
+                doc = QTextDocument()
+                doc.setHtml(core.markdown_to_html(md, title))
+                w = QPdfWriter(path)
+                w.setPageSize(QPageSize(QPageSize.A4))
+                w.setResolution(110)
+                w.setTitle(title)
+                doc.print_(w)
+        except Exception as e:  # noqa: BLE001
+            QApplication.restoreOverrideCursor()
+            fail(self, "export the manual", e)
+            return
+        QApplication.restoreOverrideCursor()
+        self.notify(f"Configuration manual saved: {path}")
+        open_in_explorer(path)
