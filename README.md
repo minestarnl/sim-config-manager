@@ -68,6 +68,7 @@ publishes `v<version>` automatically (existing releases are never overwritten).
 | **Import archive** on this or another PC (paths translated, checksums verified) | Files → Import archive |
 | **Claude connector**: Claude reads configs, history, versions and other sims; proposes changes you approve | Claude |
 | **Claude from mechanics' MacBooks** over the LAN, with a personal access key per person | Claude → Network access |
+| **ChatGPT** via OpenAI's Secure MCP Tunnel running on an engineer's Mac (nothing exposed to the internet) | Claude → Network access |
 | Runs in the tray, starts with Windows, single instance | Settings |
 
 ### Alert rule types
@@ -151,6 +152,35 @@ Mechanics can use Claude Desktop on their own laptop and talk to a sim PC over t
 * Windows laptops: **Setup for a Windows laptop…** (uses `SimConfigManager-MCP.exe --remote <url> --key <key>`).
 * The connection is plain HTTP inside your LAN with a secret key per person. Don't forward the port on the
   router / expose it to the internet.
+
+### ChatGPT, through an engineer's Mac
+
+ChatGPT talks to connectors from OpenAI's cloud. To keep the sims off the internet, it goes through OpenAI's
+[Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), run **on the
+engineer's own MacBook**:
+
+```
+ChatGPT ⇄ OpenAI ⇄ tunnel-client on Jan's Mac (outbound only) ⇄ relay ⇄ LAN ⇄ SimConfigManager on Sim 1
+```
+
+* Nothing on the sim PC or your network is reachable from the internet; no router changes.
+* The OpenAI login and keys live only on that Mac (runtime key in the macOS Keychain).
+* ChatGPT can only reach the sim while the engineer has **Start ChatGPT access** running — close the window
+  and it's cut off. The sim still checks that person's access key, and proposals show *"ChatGPT via Jan"*.
+
+Setup: on the sim PC, **Claude** tab → Network access → select the person → **Setup for ChatGPT (via a Mac)…**.
+It shows the steps and a setup script for the Mac:
+
+1. **OpenAI (once):** platform.openai.com → Settings → Organization → **Tunnels**: create a tunnel linked to your
+   ChatGPT workspace; create a runtime API key with Tunnels *Read + Use*.
+2. **Mac (once):** AirDrop the script, run `bash ~/Downloads/setup-chatgpt-sim-1.command`, paste the tunnel ID and
+   key. It installs OpenAI's `tunnel-client` with Homebrew and creates *Start ChatGPT access – Sim 1*.
+3. **ChatGPT (once):** Settings → Apps & Connectors (Developer mode if needed) → **Add custom MCP server** →
+   Connection: **Tunnel**.
+
+Availability of custom connectors and tunnels depends on your ChatGPT plan and workspace settings.
+
+![ChatGPT setup](docs/screenshots/chatgpt-setup.png)
 
 The connector is a standard MCP server (stdio), so other MCP clients work too:
 `SimConfigManager-MCP.exe [--data <data folder>]`.

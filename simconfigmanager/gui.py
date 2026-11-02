@@ -432,7 +432,8 @@ class NetSetupDialog(QDialog):
     def __init__(self, sim_name: str, key: dict, urls: list[str], kind: str, parent=None):
         super().__init__(parent)
         self.sim_name, self.key, self.kind = sim_name, key, kind
-        self.setWindowTitle(f"Setup for {key['name']} ({'Mac' if kind == 'mac' else 'Windows laptop'})")
+        self.setWindowTitle(f"Setup for {key['name']} (" + {"mac": "Claude on a Mac", "windows": "Claude on a Windows "
+                            "laptop", "chatgpt": "ChatGPT via a Mac"}[kind] + ")")
         self.resize(820, 600)
         lay = QVBoxLayout(self)
         if kind == "mac":
@@ -444,6 +445,23 @@ class NetSetupDialog(QDialog):
                      "<li>Quit Claude Desktop (⌘Q) and open it again. In a chat, the tools menu now shows "
                      f"<b>{html.escape(net.server_key_name(sim_name))}</b>.</li></ol>"
                      "Nothing needs to be installed on the Mac — it uses the built-in <i>bash</i> and <i>curl</i>.")
+        elif kind == "chatgpt":
+            steps = ("ChatGPT connects from OpenAI's cloud, so it goes through OpenAI's <b>Secure MCP Tunnel</b> "
+                     "running on this person's Mac: the Mac only connects <i>outward</i> to OpenAI and passes requests "
+                     "to this sim over the LAN. Nothing on the sim PC or your network is opened to the internet, and "
+                     "ChatGPT can only reach the sim while that Mac has it switched on."
+                     "<ol><li><b>OpenAI (once):</b> platform.openai.com → Settings → Organization → <b>Tunnels</b>: "
+                     "create a tunnel, link it to your ChatGPT workspace, copy the <i>tunnel ID</i>. Create a "
+                     "<i>runtime API key</i> with Tunnels <i>Read + Use</i>.</li>"
+                     "<li><b>Mac (once):</b> Save the script below and AirDrop it to the Mac. In Terminal run "
+                     "<code>bash ~/Downloads/" + f"setup-chatgpt-{html.escape(net.server_key_name(sim_name))}.command"
+                     + "</code> and paste the tunnel ID and key when asked (the key goes into the macOS Keychain). "
+                     "It installs OpenAI's tunnel-client with Homebrew.</li>"
+                     "<li><b>ChatGPT (once):</b> Settings → Apps &amp; Connectors (turn on Developer mode if needed) "
+                     "→ <b>Add custom MCP server</b> → Connection: <b>Tunnel</b> → choose the tunnel. If asked for "
+                     "authentication, choose none: the tunnel and this sim's personal key control access.</li>"
+                     "<li><b>Daily use:</b> on the Mac, double-click <i>Start ChatGPT access</i> in the "
+                     "<i>SimConfigManager</i> folder. Close that window to cut ChatGPT off.</li></ol>")
         else:
             steps = ("<ol><li>Copy <b>SimConfigManager-MCP.exe</b> to the laptop, e.g. "
                      "<i>C:\\SimConfigManager\\</i> (adjust the path below if you put it elsewhere).</li>"
@@ -474,7 +492,7 @@ class NetSetupDialog(QDialog):
         lay.addWidget(warn)
         row = QHBoxLayout()
         b = QPushButton("Copy to clipboard")
-        b.clicked.connect(lambda: QApplication.clipboard().setText(self.text.toPlainText()))
+        b.clicked.connect(lambda: QApplication.clipboard().setText(self.content()))
         row.addWidget(b)
         b = QPushButton("Save as file…")
         b.clicked.connect(self.save_file)
@@ -488,17 +506,29 @@ class NetSetupDialog(QDialog):
 
     def config(self) -> dict:
         url = self.url.currentText().strip()
+        if self.kind == "chatgpt":
+            return {}
         if self.kind == "mac":
             return net.mac_config(self.sim_name, url, self.key["key"])
         return net.windows_config(self.sim_name, url, self.key["key"])
 
+    def content(self) -> str:
+        if self.kind == "chatgpt":
+            return net.chatgpt_setup_script(self.sim_name, self.key["name"], self.url.currentText().strip(),
+                                            self.key["key"])
+        return json.dumps(self.config(), indent=2)
+
     def update_text(self, *_):
-        self.text.setPlainText(json.dumps(self.config(), indent=2))
+        self.text.setPlainText(self.content())
 
     def save_file(self):
-        p, _ = QFileDialog.getSaveFileName(self, "Save", "claude_desktop_config.json", "JSON (*.json)")
+        if self.kind == "chatgpt":
+            name = f"setup-chatgpt-{net.server_key_name(self.sim_name)}.command"
+            p, _ = QFileDialog.getSaveFileName(self, "Save", name, "Mac script (*.command)")
+        else:
+            p, _ = QFileDialog.getSaveFileName(self, "Save", "claude_desktop_config.json", "JSON (*.json)")
         if p:
-            Path(p).write_text(json.dumps(self.config(), indent=2), encoding="utf-8")
+            Path(p).write_bytes(self.content().encode("utf-8"))  # LF line endings, also when saved on Windows
 
 
 class ProposalDialog(QDialog):
@@ -507,7 +537,7 @@ class ProposalDialog(QDialog):
     def __init__(self, repo: Repo, prop: dict, parent=None):
         super().__init__(parent)
         self.repo, self.prop = repo, prop
-        self.setWindowTitle(f"Claude's proposed change — {prop['label']}")
+        self.setWindowTitle(f"Proposed change — {prop['label']}")
         self.resize(980, 640)
         lay = QVBoxLayout(self)
         f = repo.file(prop["file_id"])
@@ -518,7 +548,7 @@ class ProposalDialog(QDialog):
                       f" · status: <b>{prop['status']}</b>")
         head.setTextFormat(Qt.RichText)
         lay.addWidget(head)
-        reason = QLabel("<b>Claude's reason:</b><br>" + html.escape(prop["reason"]).replace("\n", "<br>"))
+        reason = QLabel("<b>Reason given:</b><br>" + html.escape(prop["reason"]).replace("\n", "<br>"))
         reason.setWordWrap(True)
         reason.setTextFormat(Qt.RichText)
         reason.setStyleSheet("background:#eef4fb; padding:8px; border-radius:4px")
@@ -2087,7 +2117,8 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         for text, fn in (("Add person…", self.add_net_key), ("Remove access", self.remove_net_key),
                          ("Setup for a Mac…", lambda: self.show_net_setup("mac")),
-                         ("Setup for a Windows laptop…", lambda: self.show_net_setup("windows"))):
+                         ("Setup for a Windows laptop…", lambda: self.show_net_setup("windows")),
+                         ("Setup for ChatGPT (via a Mac)…", lambda: self.show_net_setup("chatgpt"))):
             b = QPushButton(text)
             b.clicked.connect(fn)
             row.addWidget(b)

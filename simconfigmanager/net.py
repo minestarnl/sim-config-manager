@@ -27,6 +27,7 @@ from typing import Callable, Optional
 from .core import APP_NAME, APP_VERSION
 
 DEFAULT_PORT = 8765
+CLIENT_NAMES = {"claude": "Claude", "chatgpt": "ChatGPT"}
 FIREWALL_RULE = f"{APP_NAME} - Claude network access"
 
 
@@ -84,7 +85,8 @@ class NetworkServer:
         self.port = port
         self.host = host
         self.keys: list[dict] = []          # replaced by the app whenever keys change
-        self.last_seen: dict[str, tuple[float, str]] = {}   # key name -> (time, ip)
+        self.last_seen: dict[str, tuple[float, str]] = {}   # key name -> (time, "ip (client)")
+        self.recent: dict[str, float] = {}
         self.on_activity = on_activity
         self.httpd: Optional[ThreadingHTTPServer] = None
         self.thread: Optional[threading.Thread] = None
@@ -160,12 +162,15 @@ class NetworkServer:
                 if msg is None:
                     return rpc_error(-32700, 400, "Parse error")
                 ip = self.client_address[0]
-                first = key["name"] not in server.last_seen or time.time() - server.last_seen[key["name"]][0] > 600
-                server.last_seen[key["name"]] = (time.time(), ip)
+                client = CLIENT_NAMES.get((self.headers.get("X-SCM-Client") or "claude").strip().lower(), "Claude")
+                tag = f"{key['name']} / {client}"
+                first = tag not in server.recent or time.time() - server.recent[tag] > 600
+                server.recent[tag] = time.time()
+                server.last_seen[key["name"]] = (time.time(), f"{ip} ({client})")
                 if first and server.on_activity:
-                    server.on_activity(f"Claude connected over the network: {key['name']} from {ip}")
+                    server.on_activity(f"{client} connected over the network: {key['name']} from {ip}")
                 from .mcp_server import Server
-                handler = Server(server.data_dir, author=f"Claude via {key['name']}",
+                handler = Server(server.data_dir, author=f"{client} via {key['name']}",
                                  may_propose=bool(key.get("may_propose", True)))
                 if isinstance(msg, list):
                     resp = [r for r in (handler.handle(m) for m in msg if isinstance(m, dict)) if r]
@@ -174,7 +179,7 @@ class NetworkServer:
                 if isinstance(msg, dict) and msg.get("method") == "tools/call" and server.on_activity:
                     tool = (msg.get("params") or {}).get("name")
                     if tool == "propose_change":
-                        server.on_activity(f"{key['name']} (via Claude) proposed a change")
+                        server.on_activity(f"{key['name']} (via {client}) proposed a change")
                 if not resp:
                     return self._send(202)
                 self._send(200, (json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"))
@@ -236,10 +241,10 @@ def unreachable_text(url: str, err=None) -> str:
 
 
 # Relay for macOS (and Linux): bash + curl, both present on every Mac — nothing to download or install.
-MAC_RELAY = r'''URL="$1"; KEY="$2"
+MAC_RELAY = r'''URL="$1"; KEY="$2"; CLIENT="${3:-claude}"
 while IFS= read -r line || [ -n "$line" ]; do
   [ -z "$line" ] && continue
-  resp=$(printf '%s' "$line" | /usr/bin/curl -sS --noproxy '*' --max-time 300 -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "Authorization: Bearer $KEY" --data-binary @- "$URL")
+  resp=$(printf '%s' "$line" | /usr/bin/curl -sS --noproxy '*' --max-time 300 -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "Authorization: Bearer $KEY" -H "X-SCM-Client: $CLIENT" --data-binary @- "$URL")
   if [ $? -eq 0 ]; then
     [ -n "$resp" ] && printf '%s\n' "$resp"
   else
@@ -295,3 +300,89 @@ def check_reachable(url: str, timeout: float = 3) -> bool:
 
 def hostname() -> str:
     return os.environ.get("COMPUTERNAME") or socket.gethostname()
+
+
+# --------------------------------------------------------------------------- ChatGPT via the engineer's Mac
+#
+# ChatGPT reaches MCP servers from OpenAI's cloud. OpenAI's Secure MCP Tunnel avoids exposing anything: the
+# engineer runs OpenAI's `tunnel-client` on their own Mac; it opens an OUTBOUND connection to OpenAI, receives
+# ChatGPT's requests and hands them to a local command — our relay — which forwards them over the LAN to the
+# sim PC with the engineer's personal key. ChatGPT can only reach the sim while that Mac runs the tunnel.
+
+def _sh(v: str) -> str:
+    import shlex
+    return shlex.quote(v)
+
+
+def relay_script(url: str, key: str, client: str = "chatgpt") -> str:
+    """Standalone relay file (values baked in) — used as tunnel-client's --mcp-command."""
+    return ("#!/bin/bash\n# SimConfigManager relay: stdio <-> sim PC over the LAN. Contains a personal access key.\n"
+            f"set -- {_sh(url)} {_sh(key)} {_sh(client)}\n" + MAC_RELAY + "\n")
+
+
+def chatgpt_setup_script(sim_name: str, person: str, url: str, key: str) -> str:
+    """One-time setup for the engineer's Mac. Run with:  bash setup-chatgpt-<sim>.command"""
+    import re
+    slug = server_key_name(sim_name)
+    sim_disp = re.sub(r"[^A-Za-z0-9 ._-]", "", sim_name) or slug
+    relay = relay_script(url, key, "chatgpt")
+    return f"""#!/bin/bash
+# SimConfigManager — set up ChatGPT access to {sim_disp} on THIS Mac ({person}).
+# Run it in Terminal:   bash ~/Downloads/setup-chatgpt-{slug}.command
+# Needs: Homebrew (https://brew.sh), an OpenAI tunnel ID and a runtime API key (see the steps in the app).
+set -e
+SIM={_sh(sim_disp)}
+SLUG={_sh(slug)}
+URL={_sh(url)}
+DIR="$HOME/SimConfigManager"
+PROFILE="scm-$SLUG"
+mkdir -p "$DIR" && chmod 700 "$DIR"
+
+echo "== 1/5  Checking the connection to $SIM ($URL)"
+if /usr/bin/curl -s --noproxy '*' --max-time 5 "${{URL%/mcp}}/health" | grep -q SimConfigManager; then
+  echo "       OK - $SIM answers."
+else
+  echo "       Can't reach $SIM right now (is this Mac on the sim network and is network access on?)."
+  echo "       Setup continues; it will work once the sim PC is reachable."
+fi
+
+echo "== 2/5  OpenAI tunnel-client"
+if ! command -v tunnel-client >/dev/null 2>&1; then
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "       Homebrew is needed first: open https://brew.sh, install it, then run this script again."; exit 1
+  fi
+  brew install openai/tools/tunnel-client
+fi
+tunnel-client --version || true
+
+echo "== 3/5  Writing the relay to $DIR/$SLUG-relay.sh"
+cat > "$DIR/$SLUG-relay.sh" <<'SCM_RELAY'
+{relay}SCM_RELAY
+chmod 700 "$DIR/$SLUG-relay.sh"
+
+echo "== 4/5  Linking your OpenAI tunnel"
+read -r -p "       Tunnel ID (starts with tunnel_): " TID
+read -r -s -p "       Runtime API key (input hidden): " RKEY; echo
+security add-generic-password -U -s "SimConfigManager tunnel $SLUG" -a "$USER" -w "$RKEY"
+echo "       Key saved in your macOS Keychain."
+export CONTROL_PLANE_API_KEY="$RKEY"
+tunnel-client init --sample sample_mcp_stdio_local --profile "$PROFILE" --tunnel-id "$TID" \\
+  --mcp-command "/bin/bash $DIR/$SLUG-relay.sh"
+tunnel-client doctor --profile "$PROFILE" --explain || echo "       (doctor reported problems - see above)"
+
+echo "== 5/5  Creating the on/off switch"
+START="$DIR/Start ChatGPT access - $SIM.command"
+cat > "$START" <<SCM_START
+#!/bin/bash
+# Double-click to let ChatGPT reach $SIM through this Mac. Close the window (or Ctrl+C) to stop.
+export CONTROL_PLANE_API_KEY="\\$(security find-generic-password -s 'SimConfigManager tunnel $SLUG' -a "\\$USER" -w)"
+echo "ChatGPT can now reach $SIM through this Mac. Close this window to stop."
+exec tunnel-client run --profile "$PROFILE"
+SCM_START
+chmod 700 "$START"
+echo
+echo "Done. To switch ChatGPT access on: double-click"
+echo "   $START"
+echo "Then in ChatGPT add the connector once (Add custom MCP server -> Connection: Tunnel)."
+open "$DIR" 2>/dev/null || true
+"""

@@ -254,4 +254,8 @@ demo_key = {"name": "Jan – MacBook Pro", "key": "scm_EXAMPLE-not-a-real-key-00
 nd = gui.NetSetupDialog("Sim 1", demo_key, ["http://192.168.10.11:8765/mcp", "http://sim1.local:8765/mcp"], "mac", w)
 nd.resize(820, 600)
 shot(nd, "claude-network.png")
+nd = gui.NetSetupDialog("Sim 1", demo_key, ["http://192.168.10.11:8765/mcp", "http://sim1.local:8765/mcp"],
+                        "chatgpt", w)
+nd.resize(860, 680)
+shot(nd, "chatgpt-setup.png")
 print("done →", OUT)

@@ -109,5 +109,82 @@ def test_network():
     print("NETWORK TESTS PASSED")
 
 
+
+FAKE_TUNNEL_CLIENT = r'''#!/bin/bash
+# stand-in for OpenAI's tunnel-client: remembers init settings, and on "run" drives the MCP command like the
+# real client does (JSON-RPC lines over its stdin/stdout)
+STATE="$HOME/.fake-tunnel"
+case "$1" in
+  --version) echo "tunnel-client fake 0.0";;
+  init) shift; while [ $# -gt 0 ]; do case "$1" in --profile) P="$2";; --tunnel-id) T="$2";; --mcp-command) C="$2";; esac; shift; done
+        mkdir -p "$STATE"; printf '%s\n' "$T" > "$STATE/$P.tid"; printf '%s\n' "$C" > "$STATE/$P.cmd";;
+  doctor) echo "doctor ok";;
+  run) P="$3"; printf '%s\n' "$CONTROL_PLANE_API_KEY" > "$STATE/$P.runkey"
+       printf '%s\n%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"openai-tunnel","version":"1"}}}' \
+         '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"propose_change","arguments":{"file":"Prepar3D.cfg","reason":"via ChatGPT","replacements":[{"find":"FULLSCREEN=True","replace":"FULLSCREEN=False"}]}}}' \
+         | eval "$(cat "$STATE/$P.cmd")" > "$STATE/$P.out";;
+esac
+'''
+FAKE_SECURITY = r'''#!/bin/bash
+# stand-in for macOS "security" (Keychain)
+F="$HOME/.fake-keychain"
+if [ "$1" = add-generic-password ]; then while [ $# -gt 0 ]; do [ "$1" = -w ] && printf '%s' "$2" > "$F"; shift; done
+elif [ "$1" = find-generic-password ]; then cat "$F"; fi
+'''
+
+
+def test_chatgpt_mac_setup():
+    if not shutil.which("bash") or not Path("/usr/bin/curl").exists():
+        return  # the Mac scripts need bash + curl (CI on Windows skips this)
+    tmp = Path(tempfile.mkdtemp())
+    repo, sim = make_repo(tmp)
+    k = net.add_key(repo, "Jan – MacBook", may_propose=True)
+    port = free_port()
+    srv = net.NetworkServer(repo.data_dir, port=port, host="127.0.0.1")
+    srv.keys = net.load_keys(repo)
+    srv.start()
+    try:
+        url = f"http://127.0.0.1:{port}/mcp"
+        script = net.chatgpt_setup_script("Sim 1", "Jan", url, k["key"])
+        home, bindir = tmp / "home", tmp / "bin"
+        home.mkdir()
+        bindir.mkdir()
+        for name, body in (("tunnel-client", FAKE_TUNNEL_CLIENT), ("security", FAKE_SECURITY),
+                           ("open", "#!/bin/bash\nexit 0\n"), ("brew", "#!/bin/bash\nexit 0\n")):
+            (bindir / name).write_text(body)
+            (bindir / name).chmod(0o755)
+        (tmp / "setup.command").write_text(script)
+        env = {"HOME": str(home), "USER": "jan", "PATH": f"{bindir}:/usr/bin:/bin"}
+        assert subprocess.run(["bash", "-n", str(tmp / "setup.command")]).returncode == 0
+        r = subprocess.run(["bash", str(tmp / "setup.command")], input=b"tunnel_abc123\nsk-runtime-secret\n",
+                           capture_output=True, env=env, timeout=60)
+        assert r.returncode == 0, r.stdout.decode() + r.stderr.decode()
+        out = r.stdout.decode()
+        assert "OK - Sim 1 answers" in out, out
+        d = home / "SimConfigManager"
+        relay = d / "sim-1-relay.sh"
+        assert relay.exists() and oct(relay.stat().st_mode)[-3:] == "700"
+        assert (home / ".fake-tunnel" / "scm-sim-1.tid").read_text().strip() == "tunnel_abc123"
+        assert (home / ".fake-keychain").read_text() == "sk-runtime-secret"
+        assert "sk-runtime-secret" not in "".join(p.read_text() for p in d.iterdir())  # API key only in Keychain
+
+        # the on/off switch: starts the tunnel with the key from the Keychain, ChatGPT's calls reach the sim
+        start = d / "Start ChatGPT access - Sim 1.command"
+        assert start.exists()
+        r = subprocess.run(["bash", str(start)], capture_output=True, env=env, timeout=60)
+        assert r.returncode == 0, r.stderr.decode()
+        assert (home / ".fake-tunnel" / "scm-sim-1.runkey").read_text().strip() == "sk-runtime-secret"
+        lines = [json.loads(x) for x in (home / ".fake-tunnel" / "scm-sim-1.out").read_text().splitlines()]
+        assert lines[0]["result"]["serverInfo"]["name"] == "sim-config-manager", lines
+        assert not lines[1]["result"]["isError"], lines[1]
+        props = core.list_proposals(repo, "pending")
+        assert props and props[-1]["author"] == "ChatGPT via Jan – MacBook", props
+        assert "ChatGPT" in srv.last_seen["Jan – MacBook"][1]
+        print("CHATGPT MAC SETUP TESTS PASSED")
+    finally:
+        srv.stop()
+
+
 if __name__ == "__main__":
     test_network()
+    test_chatgpt_mac_setup()
