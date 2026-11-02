@@ -108,6 +108,8 @@ class SettingsPage:
         me.addRow("Updates:", _row_widget(button_row(("Check for updates", lambda: self.check_updates(manual=True)),
                                                      self.upd_daily)))
         me.addRow("Other sims:", _row_widget(button_row(("Connect to another sim…", self.connect_other_sim))))
+        if not self.remote:
+            me.addRow("Setup:", _row_widget(button_row(("Run first-time setup again…", self.run_onboarding))))
         me.addRow("Version:", QLabel(f"{APP_TITLE} {APP_VERSION}"))
         outer.addWidget(me_box)
         outer.addStretch(1)
@@ -198,3 +200,7 @@ class SettingsPage:
                             + (f" ({len(res['failed'])} failed)" if res.get("failed") else ""))
         self.run_bg(lambda r: r.enable_file_auditing(), done, lambda e: fail(self, "switch on file auditing", e),
                     write=True)
+
+    def run_onboarding(self):
+        from ..onboarding import OnboardingWizard
+        OnboardingWizard(self).open()

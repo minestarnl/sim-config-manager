@@ -27,7 +27,7 @@ ICONS = {  # codicon code points
     "fleet": 0xEBA3, "versions": 0xEB78, "restore": 0xEA82, "files": 0xEAF0, "history": 0xEAFC,
     "rulebook": 0xEB12, "alerts": 0xEAA2, "cloud": 0xEBAA, "claude": 0xEC10, "settings": 0xEB51,
     "chevron": 0xEAB4, "check": 0xEAB2, "remote": 0xEB3A, "plug": 0xEB2D, "warning": 0xEA6C,
-    "broadcast": 0xEAAD, "dot": 0xEA71, "tag": 0xEA66, "compare": 0xEAFD, "save": 0xEB4B, "refresh": 0xEB37,
+    "broadcast": 0xEAAD, "dot": 0xEA71, "dash": 0xEACC, "tag": 0xEA66, "compare": 0xEAFD, "save": 0xEB4B, "refresh": 0xEB37,
     "add": 0xEA60, "edit": 0xEA73, "trash": 0xEA81, "export": 0xEBAC, "upload": 0xEAC3, "pulse": 0xEB31,
     "dashboard": 0xEACD, "hardware": 0xEABE, "health": 0xEB05, "tools": 0xEB6D, "record": 0xEBA7,
     "play": 0xEB2C, "beaker": 0xEA79, "book": 0xEAA4, "package": 0xEB29, "shield": 0xEB53,
@@ -308,6 +308,7 @@ def stylesheet() -> str:
     t = T
     arrow = _glyph_file("chevron", t["muted"])
     tick = _glyph_file("check", "#ffffff", 12)
+    dash = _glyph_file("dash", "#ffffff", 12)
     return f"""
 * {{ outline: 0; }}
 QMainWindow, QDialog {{ background: {t['bg']}; }}
@@ -364,6 +365,12 @@ QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {t['input_b
 QCheckBox::indicator:hover {{ border-color: {t['focus']}; }}
 QCheckBox::indicator:checked {{ background: {t['primary']}; border-color: {t['primary']}; image: url("{tick}"); }}
 QCheckBox::indicator:disabled {{ background: {t['bg']}; border-color: {t['border']}; }}
+QTreeView::indicator, QListView::indicator, QTableView::indicator {{ width: 14px; height: 14px;
+    border: 1px solid {t['input_border']}; border-radius: 3px; background: {t['input']}; }}
+QTreeView::indicator:checked, QListView::indicator:checked, QTableView::indicator:checked {{
+    background: {t['primary']}; border-color: {t['primary']}; image: url("{tick}"); }}
+QTreeView::indicator:indeterminate {{ background: {t['primary']}; border-color: {t['primary']}; image: url("{dash}"); }}
+QTreeView::indicator:disabled {{ background: {t['border']}; border-color: {t['border']}; }}
 QTextEdit[readOnly="true"] {{ background: {t['bg']}; }}
 
 /* lists and tables */

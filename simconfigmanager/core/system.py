@@ -44,6 +44,13 @@ def discover_sim_configs() -> list[tuple[str, str, str]]:
         for x in glob.glob(os.path.join(docs, "*", "add-on.xml")):
             add(f"add-on.xml: {Path(x).parent.name}", grp + " add-ons", x)
 
+    # FSUIPC (its ini holds the button/axis assignments; also needed for the live-data bridge)
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    for d in [os.path.join(pf, "Lockheed Martin", f"Prepar3D {v}", "Modules") for v in ("v6", "v5", "v4")] + \
+            [r"C:\FSUIPC6", r"C:\FSUIPC5", os.path.join(home, "Documents", "FSUIPC6")]:
+        for x in glob.glob(os.path.join(d, "FSUIPC*.ini")):
+            add(os.path.basename(x), "FSUIPC", x)
+
     # ProSim: install location varies — look in the usual roots, two levels deep.
     roots = ["C:\\", "D:\\", "E:\\", r"C:\Program Files", r"C:\Program Files (x86)",
              os.path.join(home, "Documents"), os.path.join(home, "Desktop")]

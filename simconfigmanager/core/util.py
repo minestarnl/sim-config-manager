@@ -17,7 +17,7 @@ from typing import Optional
 
 APP_NAME = "SimConfigManager"          # technical name: folders, executables, connector
 APP_TITLE = "Sim Config Manager"       # name shown to people
-APP_VERSION = "1.12.2"
+APP_VERSION = "1.13.0"
 LEGACY_NAMES = ("SimConfigKeeper",)   # earlier name of this app (≤ 1.3)
 
 

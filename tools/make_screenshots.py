@@ -506,4 +506,30 @@ full_key = {"name": "Jan – MacBook Pro", "key": "scm_EXAMPLE-not-a-real-key-00
 nd = gui.NetSetupDialog("Sim 1", full_key, ["http://192.168.10.11:8765/mcp"], "app", w)
 nd.resize(820, 560)
 shot(nd, "remote-setup.png")
+
+# 16. first-run setup: the config files found on the sim
+from simconfigmanager.ui.onboarding import OnboardingWizard  # noqa: E402
+APPD = r"C:\Users\Sim1\AppData\Roaming\Lockheed Martin\Prepar3D v5"
+PROGD = r"C:\ProgramData\Lockheed Martin\Prepar3D v5"
+demo_found = [(f"{n} (AppData)", "P3D v5", APPD + "\\" + n) for n in
+              ("Prepar3D.cfg", "dll.xml", "exe.xml", "Cameras.cfg", "terrain.cfg")] + \
+             [("Controls/Standard.xml (AppData)", "P3D v5", APPD + r"\Controls\Standard.xml"),
+              ("add-ons.cfg (ProgramData)", "P3D v5", PROGD + r"\add-ons.cfg"),
+              ("scenery.cfg (ProgramData)", "P3D v5", PROGD + r"\scenery.cfg"),
+              ("FSUIPC6.ini", "FSUIPC", r"C:\FSUIPC6\FSUIPC6.ini"),
+              ("ProSim config.xml", "ProSim", r"C:\ProSim737\ProSim737\config.xml"),
+              ("ProSim MCP/config.xml", "ProSim", r"C:\ProSim737\MCP\config.xml"),
+              ("ProSim ProSimAudio.ini", "ProSim", r"C:\ProSim737\ProSimAudio.ini")]
+fresh = Repo(tmp / "fresh")
+fresh.set("machine_name", "Sim 2")
+fresh.discover = lambda: demo_found
+wf = gui.MainWindow(fresh, start_hidden=True)
+wz = OnboardingWizard(wf)
+wz.resize(820, 620)
+wz.show()
+wz.next()
+app.processEvents()
+wz._scan()
+shot(wz, "onboarding.png")
+wz.reject()
 print("done →", OUT)

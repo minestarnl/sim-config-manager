@@ -85,15 +85,23 @@ publishes `v<version>` automatically (existing releases are never overwritten).
 
 ## First-time setup
 
-1. **Files → Add → Find Prepar3D / ProSim config files…** suggests the usual files (Prepar3D.cfg, dll.xml,
-   exe.xml, add-ons.cfg, Cameras.cfg, scenery.cfg, Controls, ProSim config.xml). Type a group prefix like `Sim 1`.
-   Anything else: **Add → Files…** (any location) or **Add → Folder…** (all *.xml/*.cfg in a folder).
-2. Set the sim up the way it should be, then **Versions → Create version…** (v1), and on **Restore points →
-   Save current setup as restore point…** save the setups you switch between ("Customer default", "Checkride").
-3. **Sharing → Shared location**: Google Drive (direct) or a folder inside Google Drive
-   (e.g. `G:\My Drive\SimConfigManager`) or on your server (`\\SERVER\SimConfig`). Use the same place on every sim.
-4. Optional: **Sessions → Install live-data bridge…**, **Hardware & health** (required devices, projectors,
-   maintenance tasks) and **Settings → This sim → Record which program and Windows user changed a file**.
+The first time the app opens on a sim, a short setup guides you through it (run it again any time from
+*Settings → Run first-time setup again…*):
+
+1. **Name** this sim (`Sim 1`, `Sim 2` …) and yourself.
+2. **Config files** — Prepar3D, FSUIPC and ProSim files are found automatically; the usual ones (Prepar3D.cfg,
+   dll.xml, exe.xml, add-ons.cfg, Cameras.cfg, scenery.cfg, Controls, FSUIPC ini, ProSim config.xml) are ticked.
+   Untick what you don't need or add other files. Optionally also track system information.
+3. **Shared location** — a shared folder (or Google Drive, finished on the Sharing page afterwards).
+4. **Hub** — the address of your dashboard and this sim's key, with a connection test. Leave empty if you don't
+   use one.
+5. **Options** — start with Windows, quiet while flying, "who changed it", the live-data bridge.
+6. **Finish** — optionally creates **v1** right away as the starting point.
+
+![First-time setup](docs/screenshots/onboarding.png)
+
+Afterwards, save the setups you switch between as restore points (**Restore points → Save current setup as
+restore point…**). Everything from the setup can be changed later on its own page.
 
 ## What it does
 

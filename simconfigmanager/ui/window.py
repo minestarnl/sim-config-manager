@@ -37,6 +37,7 @@ from .pages.hardware import HardwarePage
 from .pages.installs import InstallsPage
 from .pages.templates import TemplatesPage
 from .services import SimServices
+from .onboarding import maybe_run_onboarding
 
 PAGE_ORDER = (FleetPage, VersionsPage, RestorePointsPage, FilesPage, HistoryPage, SessionsPage, HardwarePage,
               InstallsPage, TemplatesPage, RulebookPage, AlertsPage, SharingPage, AssistantsPage,
@@ -103,6 +104,7 @@ class MainWindow(*PAGE_ORDER, SimServices, QMainWindow):
         self.refresh_all()
         if not start_hidden:
             self.show()
+            QTimer.singleShot(400, lambda: maybe_run_onboarding(self))
 
     def build_tray(self):
         self.tray = QSystemTrayIcon(make_icon(), self)
@@ -140,6 +142,7 @@ class MainWindow(*PAGE_ORDER, SimServices, QMainWindow):
         self.raise_()
         self.activateWindow()
         self.refresh_all()
+        maybe_run_onboarding(self)
 
     def open_alerts(self):
         self.show_window()
