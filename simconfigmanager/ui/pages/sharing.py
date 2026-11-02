@@ -10,31 +10,36 @@ from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
-    QInputDialog, QLineEdit, QMessageBox, QPushButton, QTableWidget, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog,
+    QLineEdit, QTableWidget, QVBoxLayout, QWidget,
 )
 
 from ... import core
 from ...theme import TLabel as QLabel  # theme-aware versions
-from ...core import (APP_NAME, fmt_ts, unified_diff)
+from ...core import (fmt_ts, unified_diff)
 
 
 from ..dialogs import DiffDialog, pick_folder
-from ..common import item, selected_data, setup_table
+from ..common import (BAD, MUTED, OK, button, button_row, colored, confirm, fail, hint, inform, item,
+                      running_warning, section, selected_data, setup_table, warn)
+
+from . import Page
+
 
 class SharingPage:
     """Mixin for MainWindow — Sharing page."""
 
-    def build_sync_tab(self):
+    PAGE = Page("sharing", "Sharing", "cloud", "Shared location, Hub and the other sims", "build_sharing_page", "refresh_sharing")
+
+    def build_sharing_page(self):
         w = QWidget()
         lay = QVBoxLayout(w)
-        box = QGroupBox("Where to share and back up (all sims use the same place)")
-        bl = QVBoxLayout(box)
+        box, bl = section("Shared location — history backup and fleet, the same place for every sim")
         row = QHBoxLayout()
         self.sync_mode = QComboBox()
         self.sync_mode.addItem("Off", "")
         self.sync_mode.addItem("Shared folder (Google Drive for Desktop, network share, …)", "folder")
-        self.sync_mode.addItem("Google Drive — direct (no Drive app needed)", "gdrive")
+        self.sync_mode.addItem("Google Drive, direct (no Drive app needed)", "gdrive")
         row.addWidget(QLabel("Use:"))
         row.addWidget(self.sync_mode, 1)
         bl.addLayout(row)
@@ -46,16 +51,14 @@ class SharingPage:
         self.sync_edit.setPlaceholderText(r"e.g. G:\My Drive\SimConfigManager  or  \\SERVER\SimConfig")
         fl.addWidget(QLabel("Folder:"))
         fl.addWidget(self.sync_edit, 1)
-        b = QPushButton("Browse…")
-        b.clicked.connect(self.browse_sync)
-        fl.addWidget(b)
+        fl.addWidget(button("Browse…", self.browse_sync))
         bl.addWidget(self.folder_box)
 
         self.drive_box = QWidget()
         dl = self.drive_form = QFormLayout(self.drive_box)
         dl.setContentsMargins(0, 0, 0, 0)
         self.drive_auth = QComboBox()
-        self.drive_auth.addItem("Service account on a Shared Drive (recommended — no login, never expires)",
+        self.drive_auth.addItem("Service account on a Shared Drive (recommended: no sign-in, never expires)",
                                 "service_account")
         self.drive_auth.addItem("Google account (sign in once in the browser)", "user")
         dl.addRow("Sign in with:", self.drive_auth)
@@ -65,40 +68,26 @@ class SharingPage:
         self.sa_label = QLabel()
         self.sa_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         sl.addWidget(self.sa_label, 1)
-        b = QPushButton("Choose key file (.json)…")
-        b.clicked.connect(self.choose_sa_key)
-        sl.addWidget(b)
+        sl.addWidget(button("Choose key file (.json)…", self.choose_sa_key))
         dl.addRow("Service account:", self.sa_row)
         self.user_row = QWidget()
         ul = QHBoxLayout(self.user_row)
         ul.setContentsMargins(0, 0, 0, 0)
         self.user_label = QLabel()
         ul.addWidget(self.user_label, 1)
-        b = QPushButton("Choose OAuth client file…")
-        b.clicked.connect(self.choose_oauth_client)
-        ul.addWidget(b)
-        b = QPushButton("Sign in…")
-        b.clicked.connect(self.drive_sign_in)
-        ul.addWidget(b)
+        ul.addWidget(button("Choose OAuth client file…", self.choose_oauth_client))
+        ul.addWidget(button("Sign in…", self.drive_sign_in))
         dl.addRow("Google account:", self.user_row)
         self.drive_folder = QLineEdit(self.repo.get("gdrive_folder_id"))
         self.drive_folder.setPlaceholderText("Paste the folder's link from drive.google.com (or its ID)")
         dl.addRow("Folder:", self.drive_folder)
         bl.addWidget(self.drive_box)
 
-        row = QHBoxLayout()
-        b = QPushButton("Save && test connection")
-        b.clicked.connect(self.save_sync)
-        row.addWidget(b)
         self.auto_push_cb = QCheckBox("Upload automatically (every minute when something changed)")
         self.auto_push_cb.setChecked(self.repo.get("auto_push") == "1")
         self.auto_push_cb.toggled.connect(lambda v: self.repo.set("auto_push", "1" if v else "0"))
-        row.addWidget(self.auto_push_cb)
-        row.addStretch()
-        b = QPushButton("Upload now")
-        b.clicked.connect(self.push_now)
-        row.addWidget(b)
-        bl.addLayout(row)
+        bl.addLayout(button_row(("Save and test", self.save_sync, {"primary": True}), self.auto_push_cb,
+                                trailing=[("Upload now", self.push_now, {"icon": "upload"})]))
         self.sync_status = QLabel()
         self.sync_status.setWordWrap(True)
         self.sync_status.setTextFormat(Qt.RichText)
@@ -112,61 +101,38 @@ class SharingPage:
         self.drive_auth.currentIndexChanged.connect(lambda _i: self.update_sync_widgets())
         self.update_sync_widgets()
 
-        hub = QGroupBox("Central dashboard (optional) — report this sim's status to a SimConfigManager Hub web page")
-        hl = QFormLayout(hub)
-        self.hub_enable = QCheckBox("Report to a central dashboard")
+        hub, hl = section("Hub — optional central web dashboard", QFormLayout)
+        self.hub_enable = QCheckBox("Report this sim's status to a Hub")
         self.hub_enable.setChecked(self.repo.get("hub_enabled") == "1")
         hl.addRow("", self.hub_enable)
         self.hub_url = QLineEdit(self.repo.get("hub_url"))
-        self.hub_url.setPlaceholderText("Address of your hub, e.g. https://hub.example.com or http://192.168.10.5:8780")
-        hl.addRow("Hub address", self.hub_url)
+        self.hub_url.setPlaceholderText("e.g. https://hub.example.com or http://192.168.10.5:8780")
+        hl.addRow("Hub address:", self.hub_url)
         self.hub_key = QLineEdit(self.repo.get("hub_key"))
         self.hub_key.setEchoMode(QLineEdit.Password)
-        self.hub_key.setPlaceholderText("Key for this sim (hub → Sims & settings → Add sim)")
-        hl.addRow("Hub key", self.hub_key)
-        row = QHBoxLayout()
-        b = QPushButton("Save && send now")
-        b.clicked.connect(self.save_hub)
-        row.addWidget(b)
+        self.hub_key.setPlaceholderText("Key for this sim (in the Hub: Settings → Sims → Add sim)")
+        hl.addRow("Sim key:", self.hub_key)
         self.hub_status = QLabel()
         self.hub_status.setTextFormat(Qt.RichText)
         self.hub_status.setWordWrap(True)
-        row.addWidget(self.hub_status, 1)
-        holder = QWidget()
-        holder.setLayout(row)
-        hl.addRow("", holder)
-        hint = QLabel("Sends a status summary (versions, which files differ, rulebook, alerts, system info — never file "
-                      "contents) every 5 minutes and right after changes. The hub is a separate small web server you "
-                      "host yourself; see the README. Leave this off if you don't use one.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color:#555")
-        hl.addRow("", hint)
+        hl.addRow("", _row_widget(button_row(("Save and send now", self.save_hub), self.hub_status)))
+        hl.addRow("", hint("Sends a status summary (versions, files that differ, rulebook, alerts, system "
+                           "information — never file contents) every 5 minutes and right after changes. The Hub is a "
+                           "small web server you host yourself (see the README). Leave this off if you don't use one."))
         lay.addWidget(hub)
         self.update_hub_status()
 
-        box2 = QGroupBox("Other sims (from the shared location)")
-        b2 = QVBoxLayout(box2)
-        row = QHBoxLayout()
+        box2, b2 = section("Other sims in the shared location")
         self.machine_combo = QComboBox()
         self.machine_combo.currentIndexChanged.connect(lambda _i: self.refresh_remote_files())
-        row.addWidget(QLabel("PC:"))
-        row.addWidget(self.machine_combo, 1)
-        b = QPushButton("Refresh")
-        b.clicked.connect(self.refresh_sync)
-        row.addWidget(b)
-        b2.addLayout(row)
+        b2.addLayout(button_row(QLabel("Sim:"), self.machine_combo, stretch=False,
+                                trailing=[("Refresh", self.refresh_sharing, {"icon": "refresh"})]))
         self.remote_table = QTableWidget()
-        setup_table(self.remote_table, ["Name", "Group", "Path on that PC"], 2)
+        setup_table(self.remote_table, ["Name", "Group", "Path on that sim"], 2)
         b2.addWidget(self.remote_table)
-        row = QHBoxLayout()
-        for text, fn in (("Compare with a file on this PC…", self.compare_remote),
-                         ("Copy to this PC…", self.copy_remote),
-                         ("Rebuild this PC's history from this backup…", self.import_remote)):
-            b = QPushButton(text)
-            b.clicked.connect(fn)
-            row.addWidget(b)
-        row.addStretch()
-        b2.addLayout(row)
+        b2.addLayout(button_row(("Compare with a file here…", self.compare_remote),
+                                ("Copy to this sim…", self.copy_remote),
+                                trailing=[("Rebuild this sim's history from it…", self.import_remote)]))
         lay.addWidget(box2, 1)
         return w
 
@@ -175,7 +141,7 @@ class SharingPage:
         try:
             s = core.make_sync(self.repo)
         except Exception as e:  # noqa: BLE001
-            self.statusBar().showMessage(f"Sync not available: {e}")
+            self.statusBar().showMessage(f"Shared location not available: {e}")
             return None
         return s
 
@@ -199,10 +165,10 @@ class SharingPage:
             self.sa_label.setText("No key file yet. Create a service account in Google Cloud and download a JSON "
                                   "key (see README).")
         if st["token"]:
-            self.user_label.setText("<span style='color:#2e7d32'>Signed in.</span> The app keeps its files in a "
+            self.user_label.setText(colored("Signed in.", OK) + " The app keeps its files in a "
                                     "'SimConfigManager' folder in that account's Drive.")
         elif st["client_secrets"]:
-            self.user_label.setText("OAuth client set. Click Sign in.")
+            self.user_label.setText("OAuth client file chosen. Now click Sign in.")
         else:
             self.user_label.setText("Needs an OAuth client file (Desktop app) from Google Cloud, then sign in.")
 
@@ -214,13 +180,14 @@ class SharingPage:
             data = json.loads(Path(p).read_text(encoding="utf-8"))
             assert data.get("type") == "service_account" and data.get("client_email")
         except Exception:  # noqa: BLE001
-            QMessageBox.warning(self, APP_NAME, "That is not a service account key file.")
+            warn(self, "That file is not a service account key (.json from Google Cloud → IAM → Service accounts → "
+                       "Keys).")
             return
         self.repo.save_drive_file("service_account", json.dumps(data))
         self.update_sync_widgets()
-        QMessageBox.information(self, APP_NAME, f"Key saved. In Google Drive, open the Shared Drive → Manage members "
-                                f"→ add\n\n{data['client_email']}\n\nas Content manager. Then paste the link of "
-                                "the folder to use and click Save & test.")
+        inform(self, f"Key saved. In Google Drive, open the Shared Drive → Manage members → add\n\n"
+                     f"{data['client_email']}\n\nas Content manager. Then paste the link of the folder to use and "
+                     "click Save and test.")
 
     def choose_oauth_client(self):
         p, _ = QFileDialog.getOpenFileName(self, "OAuth client (Desktop app)", "", "JSON (*.json)")
@@ -230,7 +197,7 @@ class SharingPage:
             data = json.loads(Path(p).read_text(encoding="utf-8"))
             assert "installed" in data
         except Exception:  # noqa: BLE001
-            QMessageBox.warning(self, APP_NAME, "That is not an OAuth client file of type 'Desktop app'.")
+            warn(self, "That file is not an OAuth client of type 'Desktop app'.")
             return
         self.repo.save_drive_file("client_secrets", json.dumps(data))
         self.update_sync_widgets()
@@ -238,22 +205,21 @@ class SharingPage:
     def drive_sign_in(self):
         from ... import storage
         if self.remote:
-            QMessageBox.information(self, APP_NAME, "Signing in to Google opens a browser on the sim PC itself, so "
-                                    "do this step at the sim (or use the service-account option, which needs no "
-                                    "sign-in).")
+            inform(self, "Signing in to Google opens a browser on the sim PC itself, so do this step at the sim "
+                         "(or use the service account option, which needs no sign-in).")
             return
         files = core.drive_files(self.repo)
         if not files["client_secrets"].exists():
-            QMessageBox.information(self, APP_NAME, "First choose the OAuth client file.")
+            inform(self, "First choose the OAuth client file.")
             return
-        QMessageBox.information(self, APP_NAME, "Your browser opens now. Sign in with the Google account for the "
-                                "sims and allow access. Come back here afterwards.")
+        inform(self, "Your browser opens now. Sign in with the Google account for the sims and allow access, "
+                     "then come back here.")
         try:
             storage.user_sign_in(str(files["client_secrets"]), str(files["token"]))
             prov = storage.user_token_provider(str(files["token"]))
             folder_id = storage.ensure_user_root(prov)
         except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, APP_NAME, f"Sign-in failed: {e}")
+            fail(self, "sign in to Google", e)
             return
         self.repo.set("gdrive_folder_id", folder_id)
         self.drive_folder.setText(folder_id)
@@ -261,37 +227,37 @@ class SharingPage:
         self.save_sync()
 
     def browse_sync(self):
-        d = pick_folder(self, self.repo, "Sync folder", self.sync_edit.text())
+        d = pick_folder(self, self.repo, "Shared folder", self.sync_edit.text())
         if d:
             self.sync_edit.setText(d if self.remote else os.path.normpath(d))
 
     def save_sync(self):
         mode = self.sync_mode.currentData()
         self.repo.set("sync_mode", mode or "off")
-        self.repo.set("sync_folder", self.sync_edit.text().strip() if mode == "folder" else
-                      (self.repo.get("sync_folder") if mode != "gdrive" else self.repo.get("sync_folder")))
+        if mode == "folder":
+            self.repo.set("sync_folder", self.sync_edit.text().strip())
         if mode == "gdrive":
             self.repo.set("gdrive_auth", self.drive_auth.currentData())
             if self.drive_auth.currentData() == "service_account":
                 self.repo.set("gdrive_folder_id", core.parse_drive_folder(self.drive_folder.text()))
         if not mode:
-            self.sync_status.setText("Sharing is off.")
+            self.sync_status.setText("Off — this sim keeps its history only on this PC.")
             return
         s = self.sync()
         if s is None:
-            self.sync_status.setText("<span style='color:#c62828'>Not complete yet — see the fields above.</span>")
+            self.sync_status.setText(colored("Not complete yet — see the fields above.", BAD))
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             if hasattr(s.backend, "check"):
                 name = s.backend.check()
-                self.sync_status.setText(f"<span style='color:#2e7d32'>✔ Connected to Google Drive folder "
-                                         f"<b>{html.escape(name)}</b>.</span> Uploading…")
+                self.sync_status.setText(colored(f"✔ Connected to the Google Drive folder '{name}'.", OK)
+                                         + " Uploading…")
             elif not s.ok:
                 raise FileNotFoundError(f"Folder not reachable: {s.where}")
         except Exception as e:  # noqa: BLE001
             QApplication.restoreOverrideCursor()
-            self.sync_status.setText(f"<span style='color:#c62828'>✖ {html.escape(str(e))}</span>")
+            self.sync_status.setText(colored(f"✖ {e}", BAD))
             return
         QApplication.restoreOverrideCursor()
         self.sync_dirty = True
@@ -301,14 +267,14 @@ class SharingPage:
         if not hasattr(self, "hub_status"):
             return
         if self.repo.get("hub_enabled") != "1":
-            self.hub_status.setText("<span style='color:#777'>Off.</span>")
+            self.hub_status.setText(colored("Off.", MUTED))
             return
         ok = float(self.repo.get("hub_last_ok") or 0)
         err = self.repo.get("hub_last_error")
         if err:
-            self.hub_status.setText(f"<span style='color:#c62828'>✖ {html.escape(err)}</span>")
+            self.hub_status.setText(colored(f"✖ {err}", BAD))
         elif ok:
-            self.hub_status.setText(f"<span style='color:#2e7d32'>✔ Last report {fmt_ts(ok)}</span>")
+            self.hub_status.setText(colored(f"✔ Last report {fmt_ts(ok)}", OK))
         else:
             self.hub_status.setText("Waiting for the first report…")
 
@@ -321,7 +287,7 @@ class SharingPage:
             self.update_hub_status()
             return
         if self.remote:
-            self.hub_status.setText("Saved. The sim itself sends the reports.")
+            self.hub_status.setText("Saved. The sim PC sends the reports itself.")
             return
         self.hub_tick(force=True)
 
@@ -354,7 +320,7 @@ class SharingPage:
             self.repo.set("hub_last_error", "")
             self.update_hub_status()
             if force:
-                self.statusBar().showMessage(f"Reported to the hub as '{res.get('sim', '?')}'", 6000)
+                self.notify(f"Reported to the Hub as '{res.get('sim', '?')}'")
 
         def fail(e):
             self._hub_busy = False
@@ -381,7 +347,7 @@ class SharingPage:
             def fail(e):
                 self._pushing = False
                 self.sync_dirty = True
-                self.statusBar().showMessage(f"Upload failed: {e}")
+                self.statusBar().showMessage(f"Could not upload to the shared location: {e}")
             self.run_bg(lambda r: core.make_sync(r).push(), ok, fail)
         elif now - getattr(self, "_last_status", 0) > 300 and not getattr(self, "_pushing", False):
             self._last_status = now   # fleet heartbeat every 5 minutes
@@ -389,42 +355,50 @@ class SharingPage:
 
     def push_now(self):
         if self.sync() is None:
-            QMessageBox.warning(self, APP_NAME, "No sharing location is set up yet.")
+            inform(self, "No shared location is set up yet (see the fields above).")
             return
         self.sync_status.setText(self.sync_status.text().replace(" Uploading…", "") + " Uploading…")
 
         def ok(res):
             self.sync_dirty = False
             self.repo.set("last_push", core.now_ts())
-            self.statusBar().showMessage(f"Uploaded: {res['objects_copied']} new file version(s)")
-            self.refresh_sync()
+            self.notify(f"Uploaded to the shared location ({res['objects_copied']} new file revision(s))")
+            self.refresh_sharing()
 
-        def fail(e):
-            QMessageBox.warning(self, APP_NAME, f"Upload failed: {e}")
-            self.refresh_sync()
-        self.run_bg(lambda r: core.make_sync(r).push(), ok, fail)
+        def failed(e):
+            fail(self, "upload to the shared location", e)
+            self.refresh_sharing()
+        self.run_bg(lambda r: core.make_sync(r).push(), ok, failed)
 
-    def refresh_sync(self):
+    def refresh_sharing(self):
         last = self.repo.get("last_push")
         s = self.sync()
         mode = self.repo.get("sync_mode") or ("folder" if self.repo.get("sync_folder") else "")
         if mode in ("", "off"):
-            self.sync_status.setText("Sharing is off.")
+            self.sync_status.setText("Off — this sim keeps its history only on this PC.")
             s = None
         elif not s:
-            self.sync_status.setText("<span style='color:#c62828'>Not complete or not reachable right now.</span>")
+            self.sync_status.setText(colored("Not complete or not reachable right now.", BAD))
         else:
             self.sync_status.setText(f"Using <b>{html.escape(s.where)}</b> · last upload: "
                                      f"{fmt_ts(float(last)) if last else 'never'}"
                                      + ("  ·  changes waiting" if self.sync_dirty else ""))
+        if not s:
+            self._fill_machines([])
+            return
+
+        def failed(e):
+            self.statusBar().showMessage(f"Could not read the shared location: {e}")
+        self.run_bg(lambda r: core.make_sync(r).machines(), self._fill_machines, failed)
+
+    def _fill_machines(self, machines):
         cur = self.machine_combo.currentData()
         self.machine_combo.blockSignals(True)
         self.machine_combo.clear()
-        if s:
-            for m in s.machines():
-                me = " (this PC)" if m["machine"] == self.repo.machine else ""
-                self.machine_combo.addItem(f"{m['machine']}{me} — {m['files']} files, "
-                                           f"updated {fmt_ts(m['updated'])}", m["machine"])
+        for m in machines:
+            me = " (this sim)" if m["machine"] == self.repo.machine else ""
+            self.machine_combo.addItem(f"{m['machine']}{me} — {m['files']} files, updated {fmt_ts(m['updated'])}",
+                                       m["machine"])
         i = self.machine_combo.findData(cur)
         self.machine_combo.setCurrentIndex(max(i, 0))
         self.machine_combo.blockSignals(False)
@@ -432,20 +406,22 @@ class SharingPage:
 
     def refresh_remote_files(self):
         self.remote_table.setRowCount(0)
-        s = self.sync()
         m = self.machine_combo.currentData()
-        if not s or not m:
+        if not m or self.sync() is None:
             return
-        try:
-            files = [f for f in s.remote_latest(m) if f.get("active", True)]
-        except Exception as e:  # noqa: BLE001
+
+        def fill(files):
+            if self.machine_combo.currentData() != m:
+                return
+            self.remote_table.setRowCount(len(files))
+            for r, f in enumerate(files):
+                self.remote_table.setItem(r, 0, item(f.get("label") or os.path.basename(f["path"]), f))
+                self.remote_table.setItem(r, 1, item(f.get("group", "")))
+                self.remote_table.setItem(r, 2, item(f["path"] + ("   (missing)" if f["hash"] is None else "")))
+
+        def failed(e):
             self.statusBar().showMessage(f"Could not read {m}: {e}")
-            return
-        self.remote_table.setRowCount(len(files))
-        for r, f in enumerate(files):
-            self.remote_table.setItem(r, 0, item(f.get("label") or os.path.basename(f["path"]), f))
-            self.remote_table.setItem(r, 1, item(f.get("group", "")))
-            self.remote_table.setItem(r, 2, item(f["path"] + ("   (missing)" if f["hash"] is None else "")))
+        self.run_bg(lambda r: [f for f in core.make_sync(r).remote_latest(m) if f.get("active", True)], fill, failed)
 
     def selected_remote(self):
         d = selected_data(self.remote_table)
@@ -456,7 +432,7 @@ class SharingPage:
         names = [f"{f.display}  [{f.group}]  {f.path}" for f in files] + ["Other location…"]
         # pre-select a file with the same name
         default = next((i for i, f in enumerate(files) if f.display == rf.get("label")), 0)
-        choice, ok = QInputDialog.getItem(self, "Target on this PC", "Which file on THIS PC?", names, default, False)
+        choice, ok = QInputDialog.getItem(self, "File on this sim", "Which file on this sim?", names, default, False)
         if not ok:
             return None
         if choice == "Other location…":
@@ -478,12 +454,12 @@ class SharingPage:
         try:
             remote = s.fetch(rf["hash"])
         except FileNotFoundError as e:
-            QMessageBox.warning(self, APP_NAME, str(e))
+            fail(self, "download the file from the shared location", e)
             return
         lf = self.repo.find_file_by_path(target)
         mine = self.repo.read_current(lf) if lf else self.repo.read_path(target)
-        DiffDialog(f"{self.machine_combo.currentData()} → this PC",
-                   unified_diff(remote, mine, f"{self.machine_combo.currentData()}", "this PC"), self,
+        DiffDialog(f"{self.machine_combo.currentData()} → this sim",
+                   unified_diff(remote, mine, f"{self.machine_combo.currentData()}", "this sim"), self,
                    summary=core.setting_changes(remote, mine, target)).exec()
 
     def copy_remote(self):
@@ -493,9 +469,9 @@ class SharingPage:
         target = self.pick_local_target(rf)
         if not target:
             return
-        if QMessageBox.question(self, APP_NAME, f"Overwrite\n{target}\nwith the version from "
-                                f"{self.machine_combo.currentData()}?\n(A safety snapshot is taken first.)") \
-                != QMessageBox.Yes:
+        src = self.machine_combo.currentData()
+        if not confirm(self, f"Overwrite this file with the one from {src}?", "Overwrite",
+                       details=f"{target}\n\nA safety snapshot is taken first." + running_warning(self.repo)):
             return
         try:
             data = s.fetch(rf["hash"])
@@ -506,26 +482,34 @@ class SharingPage:
                 self.repo.write_path(target, data)
             self.repo.log(f"Copied {rf.get('label')} from {self.machine_combo.currentData()} to {target}")
             self.sync_dirty = True
-            self.statusBar().showMessage("Copied.")
+            self.notify(f"Copied {rf.get('label')} from {src}")
+            self.refresh_all()
         except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, APP_NAME, f"Copy failed: {e}")
+            fail(self, "copy the file", e)
 
     def import_remote(self):
         s, m = self.sync(), self.machine_combo.currentData()
         if not s or not m:
             return
         if self.repo.snapshots(1):
-            QMessageBox.information(self, APP_NAME,
-                                    "This only works on a fresh install (no history yet). It is meant for a "
-                                    "rebuilt or replacement PC: install the app, set the sync folder, then use "
-                                    "this button to get back all files, history, restore points and rules.")
+            inform(self, "This only works on a fresh install (no history yet). It is meant for a rebuilt or "
+                         "replacement PC: install the app, set up the shared location, then use this to get back "
+                         "all files, history, versions, restore points and rules.")
             return
-        if QMessageBox.question(self, APP_NAME, f"Import all history, restore points and rules from '{m}'?") \
-                == QMessageBox.Yes:
+        if confirm(self, f"Rebuild this sim's history from '{m}'?", "Rebuild",
+                   details="Imports all files, history, versions, restore points and rules. Nothing is written "
+                           "to the config files yet."):
             try:
                 res = s.import_machine(m)
-                QMessageBox.information(self, APP_NAME, f"Imported {res['files']} files and {res['snapshots']} "
-                                        "snapshots. Use Quick restore to put the configs back on disk.")
+                inform(self, f"Imported {res['files']} files and {res['snapshots']} snapshots. Use Restore points "
+                             "or Versions to put the files back on disk.")
             except Exception as e:  # noqa: BLE001
-                QMessageBox.warning(self, APP_NAME, f"Import failed: {e}")
+                fail(self, "rebuild the history", e)
             self.refresh_all()
+
+
+def _row_widget(layout) -> QWidget:
+    w = QWidget()
+    layout.setContentsMargins(0, 0, 0, 0)
+    w.setLayout(layout)
+    return w

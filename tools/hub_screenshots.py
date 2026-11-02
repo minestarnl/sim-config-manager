@@ -64,7 +64,7 @@ def report(name, version, differ=(), violations=(), alerts=(), pending=0, drv="3
            "note": "ProSim server PC (fixed IP)"},
           {"label": "Prepar3D.cfg: TERRAIN/LOD_RADIUS", "required": "", "current": "4.500000", "ok": None,
            "note": "4.5 = smooth on the projectors"}]
-    texts = {"match": "Matches", "modified": "Modified", "missing": "Missing on disk", "new": "Not in version"}
+    texts = {"match": "Matches", "modified": "Changed", "missing": "Missing on disk", "new": "Not in version"}
     return {
         "machine": name, "app_version": "1.11.0", "heartbeat": now, "files": len(FILES),
         "version": {"number": version[0], "title": version[1], "created_at": now - 86400 * 2},

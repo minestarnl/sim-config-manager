@@ -16,8 +16,9 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QWidget)
 
 from . import core, theme
-from .core import APP_NAME, Repo, TrackedFile
+from .core import APP_TITLE, Repo, TrackedFile
 from .theme import TLabel as QLabel, TTextEdit as QTextEdit  # theme-aware versions
+from .ui.common import confirm, fail, inform, running_warning
 
 # --------------------------------------------------------------------------- colours (follow the app theme)
 
@@ -578,27 +579,29 @@ class EditorWindow(QMainWindow):
         tb.setMovable(False)
         self.addToolBar(tb)
         if not self.read_only:
-            a = QAction("💾 Save", self)
+            a = QAction(theme.icon("save"), "Save", self)
             a.setShortcut(QKeySequence.Save)
             a.triggered.connect(self.save)
             tb.addAction(a)
-            a = QAction("↶ Undo", self)
+            a = QAction("Undo", self)
+            a.setShortcut(QKeySequence.Undo)
             a.triggered.connect(self.editor.undo)
             tb.addAction(a)
-            a = QAction("↷ Redo", self)
+            a = QAction("Redo", self)
+            a.setShortcut(QKeySequence.Redo)
             a.triggered.connect(self.editor.redo)
             tb.addAction(a)
-            a = QAction("Show my changes", self)
+            a = QAction(theme.icon("compare"), "Compare with file on disk", self)
             a.triggered.connect(self.show_changes)
             tb.addAction(a)
-            a = QAction("Revert to disk", self)
+            a = QAction("Reload from disk", self)
             a.triggered.connect(self.reload)
             tb.addAction(a)
             tb.addSeparator()
-        a = QAction("Find / replace", self)
+        a = QAction("Find and replace", self)
         a.triggered.connect(lambda: self.findbar.open_bar())
         tb.addAction(a)
-        a = QAction("Go to line", self)
+        a = QAction("Go to line…", self)
         a.triggered.connect(self.goto_line)
         tb.addAction(a)
         a = QAction("Check syntax", self)
@@ -618,7 +621,7 @@ class EditorWindow(QMainWindow):
         a.triggered.connect(lambda: self.zoom(-1))
         tb.addAction(a)
         tb.addSeparator()
-        tb.addWidget(QLabel(" Highlight as: "))
+        tb.addWidget(QLabel(" Language: "))
         self.kind_combo = QComboBox()
         for k, name in KIND_NAMES.items():
             self.kind_combo.addItem(name, k)
@@ -693,7 +696,7 @@ class EditorWindow(QMainWindow):
             if probs:
                 self.editor.goto_line(probs[0][0])
             else:
-                QMessageBox.information(self, APP_NAME, f"No problems found ({KIND_NAMES[self.kind]}).")
+                inform(self, f"No problems found ({KIND_NAMES[self.kind]}).")
         return probs
 
     # ---------- disk sync
@@ -714,14 +717,14 @@ class EditorWindow(QMainWindow):
 
     def show_disk_changes(self):
         data, _ = self.current_disk()
-        from .gui import DiffDialog
-        DiffDialog("Disk version vs your edits",
+        from .ui.dialogs import DiffDialog
+        DiffDialog(f"{self.file.display}: on disk now → your edits",
                    core.unified_diff(data, core.encode_text(self.editor.toPlainText(), self.text_fmt),
                                      "on disk now", "your edits"), self).exec()
 
     def reload(self, ask: bool = True):
-        if ask and self.editor.document().isModified() and QMessageBox.question(
-                self, APP_NAME, "Throw away your edits and reload the file from disk?") != QMessageBox.Yes:
+        if ask and self.editor.document().isModified() and not confirm(
+                self, "Throw away your edits and reload the file from disk?", "Reload", danger=True):
             return
         data, h = self.current_disk()
         text, self.text_fmt = core.detect_text(data)
@@ -738,9 +741,9 @@ class EditorWindow(QMainWindow):
         self.validate()
 
     def show_changes(self):
-        from .gui import DiffDialog
+        from .ui.dialogs import DiffDialog
         data, _ = self.current_disk()
-        DiffDialog(f"{self.file.display}: your unsaved changes",
+        DiffDialog(f"{self.file.display}: on disk → your edits",
                    core.unified_diff(data, core.encode_text(self.editor.toPlainText(), self.text_fmt),
                                      "on disk", "your edits"), self).exec()
 
@@ -751,7 +754,7 @@ class EditorWindow(QMainWindow):
         try:
             new = core.encode_text(self.editor.toPlainText(), self.text_fmt)
         except ValueError as e:
-            QMessageBox.warning(self, APP_NAME, str(e))
+            fail(self, f"save {self.file.display}", e)
             return False
         disk, h = self.current_disk()
         if disk == new:
@@ -790,8 +793,8 @@ class EditorWindow(QMainWindow):
         try:
             self.repo.write_file(self.file, new, note)
         except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, APP_NAME, f"Could not save: {e}\n\nIs the file open in the sim, or does "
-                                "the app need administrator rights?")
+            fail(self, f"save {self.file.display}", e, "Is the file open in the sim, or does the app need "
+                 "administrator rights?")
             return False
         self.repo.log(f"Edited {self.file.display} in the built-in editor" + (f" — {note}" if note else ""),
                       file_id=self.file.id)
@@ -805,20 +808,20 @@ class EditorWindow(QMainWindow):
         return True
 
     def restore_version(self):
-        if QMessageBox.question(self, APP_NAME, f"Overwrite {self.file.path}\nwith {self.version_label}?") \
-                != QMessageBox.Yes:
+        if not confirm(self, f"Restore {self.file.display} to {self.version_label}?", "Restore",
+                       details=f"{self.file.path}\n\nA safety snapshot is taken first." + running_warning(self.repo)):
             return
         try:
             self.repo.restore_version(self.file.id, self.version_hash, self.version_label)
             if self.on_saved:
                 self.on_saved()
-            self.statusBar().showMessage("Restored.", 5000)
+            self.statusBar().showMessage(f"Restored to {self.version_label} and recorded in History.", 5000)
         except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, APP_NAME, f"Could not restore: {e}")
+            fail(self, f"restore {self.file.display}", e)
 
     def closeEvent(self, ev):
         if not self.read_only and self.editor.document().isModified():
-            r = QMessageBox.question(self, APP_NAME, f"Save changes to {self.file.display}?",
+            r = QMessageBox.question(self, APP_TITLE, f"Save changes to {self.file.display}?",
                                      QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
             if r == QMessageBox.Cancel or (r == QMessageBox.Save and not self.save()):
                 ev.ignore()

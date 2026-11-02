@@ -6,15 +6,13 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout,
+    QApplication, QDialog, QFileDialog, QInputDialog, QLineEdit, QListWidget, QListWidgetItem,
+    QVBoxLayout,
 )
 
-from ..theme import TLabel as QLabel  # theme-aware versions
-from ..core import APP_NAME
 
 
-from .common import make_icon_remote
+from .common import button_row, confirm, fail, hint, make_icon_remote
 
 _REMOTE_WINDOWS: list = []
 
@@ -30,26 +28,14 @@ class ConnectDialog(QDialog):
         self.setWindowIcon(make_icon_remote())
         self.resize(620, 400)
         lay = QVBoxLayout(self)
-        lab = QLabel("Work on a sim PC over the network, as if you were sitting at it. The sim needs network access "
-                     "switched on and a <b>Full control</b> key for you (Claude tab → Network access → Add person).")
-        lab.setWordWrap(True)
-        lab.setTextFormat(Qt.RichText)
-        lay.addWidget(lab)
+        lay.addWidget(hint("Work on a sim PC over the network, as if you were sitting at it. The sim needs network "
+                           "access switched on and a <b>Full control</b> key for you (on the sim: AI &amp; network → "
+                           "Add person…)."))
         self.list = QListWidget()
         self.list.itemDoubleClicked.connect(lambda _it: self.connect())
         lay.addWidget(self.list, 1)
-        row = QHBoxLayout()
-        for text, fn in (("Add…", self.add), ("Add from file…", self.add_file), ("Remove", self.remove)):
-            b = QPushButton(text)
-            b.clicked.connect(fn)
-            row.addWidget(b)
-        row.addStretch()
-        b = QPushButton("Connect")
-        b.setDefault(True)
-        b.setStyleSheet("QPushButton { background:#6a1b9a; color:white; font-weight:bold; padding:6px 18px; }")
-        b.clicked.connect(self.connect)
-        row.addWidget(b)
-        lay.addLayout(row)
+        lay.addLayout(button_row(("Add…", self.add), ("Add from file…", self.add_file), ("Remove…", self.remove),
+                                 trailing=[("Connect", self.connect, {"primary": True})]))
         self.window = None
         self.reload()
 
@@ -75,8 +61,8 @@ class ConnectDialog(QDialog):
         url, ok = QInputDialog.getText(self, "Add sim", "Address of the sim PC (e.g. 192.168.10.11 or sim1.local):")
         if not ok or not url.strip():
             return
-        key, ok = QInputDialog.getText(self, "Add sim", "Access key (from the sim's Claude tab → Setup for the "
-                                       "remote app):", QLineEdit.Password)
+        key, ok = QInputDialog.getText(self, "Add sim", "Access key (on the sim: AI & network → Setup instructions → "
+                                       "Remote app):", QLineEdit.Password)
         if not ok or not key.strip():
             return
         self._store({"name": name.strip(), "url": url.strip(), "key": key.strip()})
@@ -89,13 +75,14 @@ class ConnectDialog(QDialog):
         try:
             conn = self.remote.parse_connection_file(Path(p).read_text(encoding="utf-8"))
         except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, APP_NAME, str(e))
+            fail(self, "read the connection file", e)
             return
         self._store(conn)
 
     def remove(self):
         it = self.list.currentItem()
-        if it and QMessageBox.question(self, APP_NAME, f"Forget {it.data(Qt.UserRole)['name']}?") == QMessageBox.Yes:
+        if it and confirm(self, f"Forget {it.data(Qt.UserRole)['name']}?", "Forget",
+                          details="Only removes it from this list; the sim itself is not changed."):
             name = it.data(Qt.UserRole)["name"]
             self.remote.save_connections([c for c in self.remote.load_connections() if c["name"] != name])
             self.reload()
@@ -113,7 +100,8 @@ class ConnectDialog(QDialog):
             win = MainWindow(rr)
         except Exception as e:  # noqa: BLE001
             QApplication.restoreOverrideCursor()
-            QMessageBox.warning(self, APP_NAME, str(e))
+            fail(self, f"connect to {c['name']}", e, "Is the sim PC on, is network access switched on there, and is "
+                 "the key still valid?")
             return
         QApplication.restoreOverrideCursor()
         _REMOTE_WINDOWS.append(win)

@@ -6,6 +6,7 @@ import html
 import threading
 import json
 import sys
+from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QAction, QIcon
@@ -16,7 +17,7 @@ from PySide6.QtWidgets import (
 
 from .. import core, theme
 from ..theme import TLabel as QLabel  # theme-aware versions
-from ..core import (APP_NAME, APP_VERSION, Repo, fmt_ts)
+from ..core import (APP_TITLE, APP_VERSION, Repo, fmt_ts)
 
 
 from .pages.alerts import AlertsPage
@@ -30,8 +31,13 @@ from .pages.settings import SettingsPage
 from .pages.sharing import SharingPage
 from .pages.versions import VersionsPage
 from .common import make_icon, make_icon_remote
+from .pages import Page
 
-class MainWindow(VersionsPage, RestorePointsPage, FilesPage, HistoryPage, AlertsPage, SharingPage, RulebookPage, FleetPage, AssistantsPage, SettingsPage, QMainWindow):
+PAGE_ORDER = (FleetPage, VersionsPage, RestorePointsPage, FilesPage, HistoryPage, RulebookPage, AlertsPage,
+              SharingPage, AssistantsPage, SettingsPage)   # activity bar order; Settings sits at the bottom
+
+
+class MainWindow(*PAGE_ORDER, QMainWindow):
     """The main window: activity bar + one page per area. Each page is a mixin in ui/pages/."""
 
     def __init__(self, repo: Repo, start_hidden: bool = False):
@@ -41,33 +47,20 @@ class MainWindow(VersionsPage, RestorePointsPage, FilesPage, HistoryPage, Alerts
         self.host = repo.host_info() if self.remote else {"platform": sys.platform}
         self.paused = False
         self.sync_dirty = False
-        self.setWindowTitle(f"{APP_NAME} — {repo.machine}")
+        self.setWindowTitle(f"{APP_TITLE} — {repo.machine}")
         self.setWindowIcon(make_icon())
         self.resize(1200, 760)
 
         self.tabs = QTabWidget()
         self.tabs.tabBar().hide()
         self.tabs.setDocumentMode(True)
-        self.tab_versions = self.build_versions_tab()
-        self.tab_quick = self.build_quick_tab()
-        self.tab_files = self.build_files_tab()
-        self.tab_history = self.build_history_tab()
-        self.tab_alerts = self.build_alerts_tab()
-        self.tab_sync = self.build_sync_tab()
-        self.tab_claude = self.build_claude_tab()
-        self.tab_rulebook = self.build_rulebook_tab()
-        self.tab_fleet = self.build_fleet_tab()
-        self.tab_settings = self.build_settings_tab()
-        self.tabs.addTab(self.tab_fleet, "Fleet")
-        self.tabs.addTab(self.tab_versions, "Versions")
-        self.tabs.addTab(self.tab_quick, "Quick restore")
-        self.tabs.addTab(self.tab_files, "Files")
-        self.tabs.addTab(self.tab_history, "History")
-        self.tabs.addTab(self.tab_rulebook, "Rulebook")
-        self.tabs.addTab(self.tab_alerts, "Alerts")
-        self.tabs.addTab(self.tab_sync, "Cloud / other sims")
-        self.tabs.addTab(self.tab_claude, "Claude")
-        self.tabs.addTab(self.tab_settings, "Settings")
+        self.pages: dict[str, QWidget] = {}
+        self.badges: dict[str, int] = {}
+        for cls in PAGE_ORDER:
+            spec = cls.PAGE
+            page = getattr(self, spec.build)()
+            self.pages[spec.key] = page
+            self.tabs.addTab(page, spec.title)
         self.tabs.currentChanged.connect(lambda _i: self.refresh_all())
         self.build_chrome()
         self.statusBar().showMessage("Ready")
@@ -86,7 +79,7 @@ class MainWindow(VersionsPage, RestorePointsPage, FilesPage, HistoryPage, Alerts
         self.sync_timer.start(60_000)
 
         if self.remote:
-            self.setWindowTitle(f"{APP_NAME} — {repo.machine} (remote, {repo.base})")
+            self.setWindowTitle(f"{APP_TITLE} — {repo.machine} (remote, {repo.base})")
             self.setWindowIcon(make_icon_remote())
         else:
             self.repo.background_probes = True
@@ -106,15 +99,15 @@ class MainWindow(VersionsPage, RestorePointsPage, FilesPage, HistoryPage, Alerts
 
     def build_tray(self):
         self.tray = QSystemTrayIcon(make_icon(), self)
-        self.tray.setToolTip(f"{APP_NAME} — watching config files")
+        self.tray.setToolTip(f"{APP_TITLE} — watching config files")
         menu = QMenu()
         menu.addAction("Open", self.show_window)
         self.tray_version_action = menu.addAction("Version status…", self.open_versions)
-        menu.addAction("Create new version…", self.create_version)
+        menu.addAction("Create version…", self.create_version)
         menu.addSeparator()
-        menu.addAction("Snapshot now…", self.snapshot_now)
-        menu.addAction("Export archive (zip)…", self.export_archive)
-        self.tray_rp_menu = menu.addMenu("Restore all to…")
+        menu.addAction("Record snapshot…", self.snapshot_now)
+        menu.addAction("Export certification archive…", lambda: self.export_archive())
+        self.tray_rp_menu = menu.addMenu("Restore point")
         self.pause_action = QAction("Pause monitoring", self, checkable=True)
         self.pause_action.toggled.connect(self.set_paused)
         menu.addAction(self.pause_action)
@@ -130,7 +123,7 @@ class MainWindow(VersionsPage, RestorePointsPage, FilesPage, HistoryPage, Alerts
         self.tray_rp_menu.clear()
         rps = self.repo.restore_points()
         if not rps:
-            a = self.tray_rp_menu.addAction("(no restore points yet)")
+            a = self.tray_rp_menu.addAction("No restore points yet")
             a.setEnabled(False)
         for rp in rps:
             self.tray_rp_menu.addAction(rp.name, lambda r=rp: self.restore_rp(r))
@@ -143,14 +136,14 @@ class MainWindow(VersionsPage, RestorePointsPage, FilesPage, HistoryPage, Alerts
 
     def open_alerts(self):
         self.show_window()
-        self.tabs.setCurrentWidget(self.tab_alerts)
+        self.go("alerts")
 
     def closeEvent(self, ev):
         # closing the window just hides to tray; monitoring keeps running
         ev.ignore()
         self.hide()
         if not self.repo.get("tray_hint_shown"):
-            self.tray.showMessage(APP_NAME, "Still running in the tray and watching your files.",
+            self.tray.showMessage(APP_TITLE, "Still running in the tray and watching your files.",
                                   QSystemTrayIcon.Information, 4000)
             self.repo.set("tray_hint_shown", "1")
 
@@ -169,10 +162,17 @@ class MainWindow(VersionsPage, RestorePointsPage, FilesPage, HistoryPage, Alerts
         self.tray.hide()
         QApplication.quit()
 
+    def notify(self, text: str, title: str = "", warning: bool = False, ms: int = 6000) -> None:
+        """One way to report a result: status bar always, tray balloon when the window is hidden or it's a warning."""
+        self.statusBar().showMessage(text, max(ms, 8000))
+        if warning or not self.isVisible():
+            self.tray.showMessage(title or APP_TITLE, text,
+                                  QSystemTrayIcon.Warning if warning else QSystemTrayIcon.Information, ms)
+
     def set_paused(self, on: bool):
         self.paused = on
-        self.tray.setToolTip(f"{APP_NAME} — {'PAUSED' if on else 'watching config files'}")
-        self.statusBar().showMessage("Monitoring paused" if on else "Monitoring")
+        self.tray.setToolTip(f"{APP_TITLE} — {'PAUSED' if on else 'watching config files'}")
+        self.statusBar().showMessage("Monitoring paused" if on else "Monitoring resumed", 8000)
 
     def apply_poll_interval(self):
         try:
@@ -204,12 +204,12 @@ class MainWindow(VersionsPage, RestorePointsPage, FilesPage, HistoryPage, Alerts
                 return
             alerts = self.repo.process_changes(changes)
         except Exception as e:  # noqa: BLE001
-            self.statusBar().showMessage(f"Scan error: {e}")
+            self.statusBar().showMessage(f"Could not check the files: {e}")
             return
         self.sync_dirty = True
         for a in alerts[:5]:
             icon = QSystemTrayIcon.Warning
-            self.tray.showMessage(f"{APP_NAME}: {a.rule.name}", a.message, icon, 10000)
+            self.tray.showMessage(f"{APP_TITLE}: {a.rule.name}", a.message, icon, 10000)
         if alerts:
             self.tray.setIcon(make_icon(alert=True))
             QTimer.singleShot(30_000, lambda: self.tray.setIcon(make_icon()))
@@ -221,29 +221,33 @@ class MainWindow(VersionsPage, RestorePointsPage, FilesPage, HistoryPage, Alerts
             self.update_version_indicator()
 
     def refresh_all(self):
-        cur = self.tabs.currentWidget()
         self.rebuild_tray_rp_menu()
-        fn = {self.tab_versions: self.refresh_versions, self.tab_quick: self.refresh_quick,
-              self.tab_files: self.refresh_files, self.tab_history: self.refresh_history,
-              self.tab_alerts: self.refresh_alerts, self.tab_sync: self.refresh_sync,
-              self.tab_claude: self.refresh_claude, self.tab_rulebook: self.refresh_rulebook,
-              self.tab_fleet: self.refresh_fleet}.get(cur)
-        if fn:
-            fn()
+        spec = self.current_spec()
+        if spec and spec.refresh:
+            getattr(self, spec.refresh)()
         self.update_version_indicator()
 
-    PAGES = {  # tab attribute: (title, codicon, subtitle)
-        "tab_fleet": ("Fleet", "fleet", "Every sim at a glance"),
-        "tab_versions": ("Versions", "versions", "Numbered configurations and what differs from them"),
-        "tab_quick": ("Quick restore", "restore", "Put all files back to a saved setup"),
-        "tab_files": ("Files", "files", "Tracked files and their history"),
-        "tab_history": ("History", "history", "Every recorded snapshot"),
-        "tab_rulebook": ("Rulebook", "rulebook", "Documented and locked settings"),
-        "tab_alerts": ("Alerts", "alerts", "Rules, ignored settings and the event log"),
-        "tab_sync": ("Cloud & other sims", "cloud", "Google Drive or a shared folder"),
-        "tab_claude": ("AI assistants & network", "claude", "Claude, ChatGPT and remote access"),
-        "tab_settings": ("Settings", "settings", ""),
-    }
+    # ================================================================= page navigation
+    def current_page(self) -> str:
+        page = self.tabs.currentWidget()
+        return next((k for k, w in self.pages.items() if w is page), "")
+
+    def current_spec(self) -> Optional[Page]:
+        key = self.current_page()
+        return next((c.PAGE for c in PAGE_ORDER if c.PAGE.key == key), None)
+
+    def is_current(self, key: str) -> bool:
+        return self.isVisible() and self.current_page() == key
+
+    def go(self, key: str) -> None:
+        """Show a page (by key, see PAGE_ORDER)."""
+        self.tabs.setCurrentWidget(self.pages[key])
+
+    def set_badge(self, key: str, count: int) -> None:
+        """Number shown on a page's activity-bar icon (0 = none)."""
+        if self.badges.get(key, 0) != count:
+            self.badges[key] = count
+            self.sync_activity()
 
     def build_chrome(self):
         central = QWidget()
@@ -260,20 +264,18 @@ class MainWindow(VersionsPage, RestorePointsPage, FilesPage, HistoryPage, Alerts
         self.activity = {}
         group = QButtonGroup(self)
         group.setExclusive(True)
-        for idx in range(self.tabs.count()):
-            page = self.tabs.widget(idx)
-            attr = next(a for a in self.PAGES if getattr(self, a, None) is page)
-            title, glyph, _sub = self.PAGES[attr]
+        for idx, cls in enumerate(PAGE_ORDER):
+            spec = cls.PAGE
             b = QToolButton()
             b.setCheckable(True)
             b.setFixedSize(48, 48)
             b.setIconSize(QSize(24, 24))
-            b.setToolTip(title)
+            b.setToolTip(spec.title)
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda _c=False, i=idx: self.tabs.setCurrentIndex(i))
             group.addButton(b)
-            self.activity[idx] = (b, glyph)
-            if attr == "tab_settings":
+            self.activity[spec.key] = b
+            if spec.key == "settings":
                 bl.addStretch(1)
             bl.addWidget(b)
         h.addWidget(bar)
@@ -309,7 +311,7 @@ class MainWindow(VersionsPage, RestorePointsPage, FilesPage, HistoryPage, Alerts
         self.sb_host = QLabel()
         self.sb_version = QLabel()
         self.sb_net = QLabel()
-        self.sb_app = QLabel(f"{APP_NAME} {APP_VERSION}")
+        self.sb_app = QLabel(f"{APP_TITLE} {APP_VERSION}")
         for w in (self.sb_host, self.sb_version, self.sb_net, self.sb_app):
             sb.addPermanentWidget(w)
         self.tabs.currentChanged.connect(lambda _i: self.sync_activity())
@@ -323,23 +325,23 @@ class MainWindow(VersionsPage, RestorePointsPage, FilesPage, HistoryPage, Alerts
     def sync_activity(self):
         if not hasattr(self, "activity"):
             return
-        cur = self.tabs.currentIndex()
-        for idx, (b, glyph) in self.activity.items():
-            text = self.tabs.tabText(idx)
-            badge = text[text.rfind("(") + 1:-1] if text.endswith(")") and "(" in text else None
+        cur = self.current_page()
+        for cls in PAGE_ORDER:
+            spec = cls.PAGE
+            b = self.activity[spec.key]
+            n = self.badges.get(spec.key, 0)
+            badge = str(n) if n else None
             ico = QIcon()
-            ico.addPixmap(theme.glyph_pixmap(glyph, theme.T["activity_fg"], 24, badge), QIcon.Normal, QIcon.Off)
-            ico.addPixmap(theme.glyph_pixmap(glyph, theme.T["activity_active"], 24, badge), QIcon.Normal, QIcon.On)
-            ico.addPixmap(theme.glyph_pixmap(glyph, theme.T["activity_active"], 24, badge), QIcon.Active, QIcon.Off)
+            ico.addPixmap(theme.glyph_pixmap(spec.icon, theme.T["activity_fg"], 24, badge), QIcon.Normal, QIcon.Off)
+            ico.addPixmap(theme.glyph_pixmap(spec.icon, theme.T["activity_active"], 24, badge), QIcon.Normal, QIcon.On)
+            ico.addPixmap(theme.glyph_pixmap(spec.icon, theme.T["activity_active"], 24, badge), QIcon.Active, QIcon.Off)
             b.setIcon(ico)
-            b.setChecked(idx == cur)
-            b.setToolTip(text)
-        page = self.tabs.currentWidget()
-        attr = next((a for a in self.PAGES if getattr(self, a, None) is page), None)
-        if attr:
-            title, _g, sub = self.PAGES[attr]
-            self.page_title.setText(title.upper())
-            self.page_subtitle.setText(sub)
+            b.setChecked(spec.key == cur)
+            b.setToolTip(spec.title + (f" ({n})" if n else ""))
+        spec = self.current_spec()
+        if spec:
+            self.page_title.setText(spec.title.upper())
+            self.page_subtitle.setText(spec.subtitle)
 
     def update_statusbar(self, version_text: str = ""):
         if not hasattr(self, "sb_host"):
@@ -372,20 +374,20 @@ class MainWindow(VersionsPage, RestorePointsPage, FilesPage, HistoryPage, Alerts
         else:
             txt = f"all files match v{ver.number}"
         state = "PAUSED · " if self.paused else ""
-        self.tray.setToolTip(f"{APP_NAME} — {state}{txt}")
+        self.tray.setToolTip(f"{APP_TITLE} — {state}{txt}")
         self.tray_version_action.setText(f"Version status: {txt}")
-        self.setWindowTitle(f"{APP_NAME} — {self.repo.machine}{' (remote)' if self.remote else ''} — {txt}")
+        self.setWindowTitle(f"{APP_TITLE} — {self.repo.machine}{' (remote)' if self.remote else ''} — {txt}")
         glyph = "warning" if (ver and mm) else ("check" if ver else "tag")
         self.update_statusbar(f"{self._glyph(glyph)} {html.escape(txt)}")
         prev = getattr(self, "_last_mismatch_count", None)
         self._last_mismatch_count = len(mm)
         if ver and prev == 0 and mm and self.repo.get("notify_version_drift") != "0":
-            self.tray.showMessage(f"{APP_NAME}: files differ from v{ver.number}",
+            self.tray.showMessage(f"{APP_TITLE}: files differ from v{ver.number}",
                                   ", ".join(m.file.display for m in mm[:5]), QSystemTrayIcon.Warning, 8000)
 
     def open_versions(self):
         self.show_window()
-        self.tabs.setCurrentWidget(self.tab_versions)
+        self.go("versions")
 
     def run_bg(self, fn, done=None, err=None):
         """Run fn(bg_repo) on the background worker (its own read-only store connection); callbacks on the UI."""

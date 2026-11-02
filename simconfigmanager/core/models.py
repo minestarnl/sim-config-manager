@@ -61,7 +61,7 @@ class VersionStatus:
 
 STATUS_TEXT = {
     "match": "Matches",
-    "modified": "Modified",
+    "modified": "Changed",
     "missing": "Missing on disk",
     "new": "Not in version",
     "gone": "Deleted (as in version)",

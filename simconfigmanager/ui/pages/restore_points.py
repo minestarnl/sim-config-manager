@@ -7,32 +7,33 @@ from typing import Optional
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QGridLayout, QHBoxLayout, QInputDialog, QMenu, QMessageBox, QPushButton, QSystemTrayIcon,
-    QVBoxLayout, QWidget, QColorDialog, QScrollArea,
+    QGridLayout, QHBoxLayout, QInputDialog, QMenu, QPushButton, QVBoxLayout, QWidget,
+    QColorDialog, QScrollArea,
 )
 
 from ...theme import TLabel as QLabel  # theme-aware versions
-from ...core import (APP_NAME, fmt_ts)
+from ...core import fmt_ts
 
+
+
+from ..common import ACCENT, OK, WARN, button, colored, confirm, fail, hint, inform
+from . import Page
 
 
 class RestorePointsPage:
     """Mixin for MainWindow — Restore points page."""
 
-    def build_quick_tab(self):
+    PAGE = Page("restore", "Restore points", "restore", "Put every file back to a saved setup in one click", "build_restore_page", "refresh_restore_points")
+
+    def build_restore_page(self):
         w = QWidget()
         lay = QVBoxLayout(w)
         top = QHBoxLayout()
-        title = QLabel("<h2>Restore all files to a saved setup</h2>")
-        top.addWidget(title)
-        top.addStretch()
-        b = QPushButton("Save current setup as restore point…")
-        b.clicked.connect(self.new_restore_point)
-        top.addWidget(b)
+        self.quick_info = hint("")
+        top.addWidget(self.quick_info, 1)
+        top.addWidget(button("Save current setup as restore point…", self.new_restore_point, primary=True,
+                             icon="save"), 0, Qt.AlignTop)
         lay.addLayout(top)
-        self.quick_info = QLabel()
-        self.quick_info.setStyleSheet("color:#555")
-        lay.addWidget(self.quick_info)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         self.quick_holder = QWidget()
@@ -44,7 +45,7 @@ class RestorePointsPage:
         lay.addWidget(self.quick_status)
         return w
 
-    def refresh_quick(self):
+    def refresh_restore_points(self):
         while self.quick_grid.count():
             wdg = self.quick_grid.takeAt(0).widget()
             if wdg:
@@ -54,13 +55,13 @@ class RestorePointsPage:
         rps = self.repo.restore_points()
         self.quick_info.setText("Each button restores every tracked file to how it was when the restore point was "
                                 "saved. A safety snapshot is always taken first, so a restore can be undone from "
-                                "History. Right-click a button for more options." if rps else
+                                "History. Right-click a button for more options (restore one group, compare, edit…)." if rps else
                                 "No restore points yet. Set the sims up the way you want them, then click "
                                 "'Save current setup as restore point…'.")
         for i, rp in enumerate(rps):
             btn = QPushButton(f"{rp.name}\n{rp.description[:40]}" if rp.description else rp.name)
             btn.setMinimumSize(QSize(240, 90))
-            col = rp.color or "#1f4e79"
+            col = rp.color or ACCENT
             btn.setStyleSheet(f"QPushButton {{ background:{col}; color:white; font-size:15px; font-weight:bold;"
                               f" border-radius:10px; padding:8px; }} QPushButton:hover {{ border:3px solid #ffb300; }}")
             btn.setToolTip(f"Saved {fmt_ts(rp.created_at)} — snapshot #{rp.snapshot_id}\n{rp.description}")
@@ -74,25 +75,26 @@ class RestorePointsPage:
         vtxt = ""
         if ver:
             n = len(self.repo.mismatches())
-            vtxt = (f" · <b style='color:#e65100'>{n} differ from v{ver.number}</b>" if n
-                    else f" · <span style='color:#2e7d32'>matches v{ver.number}</span>")
-        self.quick_status.setText(f"{len(files)} files tracked{vtxt} · "
-                                  + (f"<b style='color:#e65100'>{len(changed)} changed since last snapshot</b>"
-                                     if changed else "all files match the last snapshot"))
+            vtxt = (" · " + colored(f"{n} differ from v{ver.number}", WARN, True) if n
+                    else " · " + colored(f"all match v{ver.number}", OK))
+        self.quick_status.setText(f"{len(files)} tracked files{vtxt} · "
+                                  + (colored(f"{len(changed)} changed since the last snapshot", WARN, True)
+                                     if changed else "nothing changed since the last snapshot"))
 
     def rp_context(self, rp, btn):
         m = QMenu(self)
-        m.addAction("Restore all files", lambda: self.restore_rp(rp))
-        grp = m.addMenu("Restore only group")
+        m.addAction("Restore all files…", lambda: self.restore_rp(rp))
+        grp = m.addMenu("Restore one group")
         for g in self.repo.groups():
             grp.addAction(g, lambda gg=g: self.restore_rp(rp, group=gg))
-        m.addAction("Compare with current files…", lambda: self.compare_snapshot_with_current(rp.snapshot_id,
+        m.addAction("Compare with the files on disk…", lambda: self.compare_snapshot_with_current(rp.snapshot_id,
                                                                                               rp.name))
         m.addSeparator()
-        m.addAction("Edit name / description / colour…", lambda: self.edit_rp(rp))
-        m.addAction("Update to the CURRENT files…", lambda: self.overwrite_rp(rp))
-        m.addAction("Export as zip…", lambda: self.export_zip(rp.snapshot_id, rp.name))
-        m.addAction("Delete restore point", lambda: self.delete_rp(rp))
+        m.addAction("Edit name, description and colour…", lambda: self.edit_rp(rp))
+        m.addAction("Replace with the files on disk now…", lambda: self.overwrite_rp(rp))
+        m.addAction("Export files as zip…", lambda: self.export_zip(rp.snapshot_id, rp.name))
+        m.addSeparator()
+        m.addAction("Delete restore point…", lambda: self.delete_rp(rp))
         m.exec(btn.mapToGlobal(btn.rect().center()))
 
     def new_restore_point(self, snapshot_id: Optional[int] = None):
@@ -101,7 +103,7 @@ class RestorePointsPage:
             return
         desc, _ = QInputDialog.getText(self, "Restore point", "Short description (optional):")
         if self.repo.restore_point(name.strip()):
-            if QMessageBox.question(self, APP_NAME, f"'{name}' already exists. Replace it?") != QMessageBox.Yes:
+            if not confirm(self, f"A restore point called '{name.strip()}' already exists.", "Replace it"):
                 return
         self.repo.create_restore_point(name.strip(), desc, snapshot_id=snapshot_id)
         self.sync_dirty = True
@@ -114,23 +116,22 @@ class RestorePointsPage:
         desc, ok = QInputDialog.getText(self, "Restore point", "Description:", text=rp.description)
         if not ok:
             return
-        col = QColorDialog.getColor(QColor(rp.color or "#1f4e79"), self, "Button colour")
+        col = QColorDialog.getColor(QColor(rp.color or ACCENT), self, "Button colour")
         self.repo.update_restore_point(rp.id, name.strip() or rp.name, desc, col.name() if col.isValid()
                                        else rp.color)
         self.sync_dirty = True
         self.refresh_all()
 
     def overwrite_rp(self, rp):
-        if QMessageBox.question(self, APP_NAME, f"Replace '{rp.name}' with the files as they are right now?") \
-                == QMessageBox.Yes:
+        if confirm(self, f"Replace '{rp.name}' with the files as they are on disk right now?", "Replace"):
             snap = self.repo.commit(f"Restore point update: {rp.name}") or self.repo.latest_snapshot()
             self.repo.update_restore_point_snapshot(rp.id, snap.id)
             self.sync_dirty = True
             self.refresh_all()
 
     def delete_rp(self, rp):
-        if QMessageBox.question(self, APP_NAME, f"Delete restore point '{rp.name}'?\n"
-                                "(The snapshot itself stays in History.)") == QMessageBox.Yes:
+        if confirm(self, f"Delete restore point '{rp.name}'?", "Delete", danger=True,
+                   details="The snapshot itself stays in History."):
             self.repo.delete_restore_point(rp.id)
             self.sync_dirty = True
             self.refresh_all()
@@ -145,7 +146,7 @@ class RestorePointsPage:
         preview = self.repo.preview_restore(snapshot_id, file_ids)
         todo = [(f, a) for f, a in preview if a == "will be restored"]
         if not todo:
-            QMessageBox.information(self, APP_NAME, f"Everything already matches '{label}'. Nothing to do.")
+            inform(self, f"Nothing to restore — every file already matches '{label}'.")
             return
         running = self.repo.running_sim_processes()
         txt = "\n".join(f"• {f.display}  [{f.group}]" for f, _ in todo[:25])
@@ -156,19 +157,17 @@ class RestorePointsPage:
             warn = ("\n\n⚠ These sim programs are running: " + ", ".join(running) +
                     "\nThey may overwrite restored files when they exit (P3D rewrites Prepar3D.cfg on exit). "
                     "Best to close them first.")
-        if QMessageBox.question(self, f"Restore to '{label}'",
-                                f"{len(todo)} file(s) will be overwritten:\n\n{txt}{warn}\n\n"
-                                "A safety snapshot is taken first. Continue?") != QMessageBox.Yes:
+        if not confirm(self, f"Restore {len(todo)} file(s) to '{label}'?", f"Restore {len(todo)} file(s)",
+                       title="Restore", details=f"{txt}{warn}\n\nA safety snapshot is taken first, so this can be "
+                       "undone from History."):
             return
         report = self.repo.restore(snapshot_id, file_ids, label=label)
         failed = [(f, r) for f, r in report if r.startswith("FAILED")]
         self.sync_dirty = True
         self.refresh_all()
         if failed:
-            QMessageBox.warning(self, APP_NAME, "Some files could not be restored (in use or no permission? "
-                                "Try closing the sim or running as administrator):\n\n" +
-                                "\n".join(f"{f.display}: {r}" for f, r in failed))
+            fail(self, "restore every file", "\n".join(f"{f.display}: {r}" for f, r in failed),
+                 "Is the file open in the sim, or is the app not running as administrator?")
         else:
             n = sum(1 for _, r in report if r == "restored")
-            self.tray.showMessage(APP_NAME, f"Restored {n} file(s) to '{label}'", QSystemTrayIcon.Information,
-                                  5000)
+            self.notify(f"Restored {n} file(s) to '{label}'")

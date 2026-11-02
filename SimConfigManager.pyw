@@ -60,7 +60,7 @@ def main():
     lock = QLockFile(str(Path(data_dir) / "instance.lock"))
     if not lock.tryLock(100):
         if not args.minimized:
-            QMessageBox.information(None, APP_NAME, f"{APP_NAME} is already running — look for its icon in "
+            QMessageBox.information(None, core.APP_TITLE, f"{core.APP_TITLE} is already running — look for its icon in "
                                     "the system tray (bottom-right, maybe under the ^ arrow).")
         return 0
 

@@ -48,11 +48,12 @@ def save_keys(repo, keys: list[dict]) -> None:
     repo.set("net_keys", json.dumps(keys))
 
 
-ACCESS_LEVELS = {
-    "read": "Claude/ChatGPT: read only",
-    "propose": "Claude/ChatGPT: read + propose changes (you approve)",
-    "full": "Full control: remote app (edit, restore, versions …) + Claude/ChatGPT",
+ACCESS_LEVELS = {  # same wording in the app, the setup dialogs and the README
+    "read": "AI assistants: read only",
+    "propose": "AI assistants: read + propose changes (you approve)",
+    "full": "Full control: remote app (edit, restore, versions …) + AI assistants",
 }
+ACCESS_SHORT = {"read": "Read only", "propose": "Read + propose", "full": "Full control"}
 
 
 def key_level(k: dict) -> str:

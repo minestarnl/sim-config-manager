@@ -211,18 +211,18 @@ w.show()
 w.update_version_indicator()
 
 # 1. versions overview
-w.tabs.setCurrentWidget(w.tab_versions)
+w.go("versions")
 w.refresh_all()
 w.ver_list.selectRow(0)
 shot(w, "versions.png")
 
 # 2. quick restore
-w.tabs.setCurrentWidget(w.tab_quick)
+w.go("restore")
 w.refresh_all()
 shot(w, "quick-restore.png")
 
 # 3. files + history
-w.tabs.setCurrentWidget(w.tab_files)
+w.go("files")
 w.refresh_all()
 for r in range(w.files_table.rowCount()):
     if w.files_table.item(r, 1).text() == "Prepar3D.cfg":
@@ -230,7 +230,7 @@ for r in range(w.files_table.rowCount()):
 shot(w, "files.png")
 
 # 4. alerts
-w.tabs.setCurrentWidget(w.tab_alerts)
+w.go("alerts")
 w.refresh_all()
 shot(w, "alerts.png")
 
@@ -273,7 +273,7 @@ core.create_proposal(repo, cfgf, cur.replace(b"TEXTURE_MAX_LOAD=2048", b"TEXTURE
                      "TEXTURE_MAX_LOAD was lowered to 2048 today, which explains the blurry ground textures the "
                      "instructor reported. Sim 2 runs 4096 on the same RTX 4080 without stutters, so restoring 4096 "
                      "matches the certified v3 value. LOD_RADIUS 5.5 is a middle ground between v1 (6.5) and v2 (4.5).")
-w.tabs.setCurrentWidget(w.tab_claude)
+w.go("assistants")
 w.check_proposals()
 w.refresh_all()
 shot(w, "claude.png")
@@ -300,7 +300,7 @@ sd.resize(900, 560)
 shot(sd, "diff-settings.png")
 
 # 11. rulebook
-w.tabs.setCurrentWidget(w.tab_rulebook)
+w.go("rulebook")
 w.refresh_all()
 shot(w, "rulebook.png")
 
@@ -331,7 +331,7 @@ for name, extra in (("Sim 2", {"mismatches": [], "alerts_24h": 0, "rulebook_viol
                      .replace("32.0.15.6603", "32.0.15.6603" if name == "Sim 2" else "32.0.15.6094")}}
     st.update(extra)
     be.write(f"status/{name.replace(' ', '_')}.json", json.dumps(st).encode())
-w.tabs.setCurrentWidget(w.tab_fleet)
+w.go("fleet")
 w.refresh_fleet()
 end = time.time() + 10
 while time.time() < end and w.fleet_table.rowCount() < 3:
@@ -341,7 +341,7 @@ w.fleet_table.selectRow(2)
 shot(w, "fleet.png")
 
 # 13. cloud tab set to Google Drive
-w.tabs.setCurrentWidget(w.tab_sync)
+w.go("sharing")
 w.sync_mode.setCurrentIndex(w.sync_mode.findData("gdrive"))
 w.drive_folder.setText("https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz")
 w.update_sync_widgets()

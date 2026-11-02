@@ -9,59 +9,49 @@ import sys
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout, QInputDialog,
-    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QSystemTrayIcon, QTableWidget,
-    QVBoxLayout, QWidget,
+    QMenu,
+    QApplication, QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QInputDialog, QListWidget,
+    QListWidgetItem, QSpinBox, QSystemTrayIcon, QTableWidget, QVBoxLayout, QWidget,
 )
 
 from ... import core, net, theme
 from ...theme import TLabel as QLabel, TTextEdit as QTextEdit  # theme-aware versions
-from ...core import (APP_NAME, fmt_ts)
+from ...core import fmt_ts
 
 
 from ..dialogs import NetSetupDialog, ProposalDialog
-from ..common import item, selected_data, setup_table
+from ..common import (BAD, MUTED, OK, WARN, button, button_row, colored, confirm, fail, heading, hint, inform,
+                      item, section, selected_data, setup_table, warn)
+
+from . import Page
+
 
 class AssistantsPage:
     """Mixin for MainWindow — AI & network page."""
 
-    def build_claude_tab(self):
+    PAGE = Page("assistants", "AI & network", "claude", "Claude, ChatGPT, proposed changes and network access", "build_assistants_page", "refresh_assistants")
+
+    def build_assistants_page(self):
         w = QWidget()
         lay = QVBoxLayout(w)
-        intro = QLabel(
-            "<h2 style='margin:0'>Let Claude read your configs</h2>"
-            "<p>With the <b>Claude Desktop</b> app on this PC, Claude can read every tracked file, its history and "
-            "versions, and the other sims' files (via the sync folder) — to troubleshoot problems and help dial in "
-            "settings. Claude can also <b>propose</b> changes, but nothing is written until you approve it here; "
-            "every applied change is recorded in History and can be undone.</p>"
-            "<p style='color:#555'>Try asking Claude: <i>“Why do we get stutters on Sim 2 but not Sim 1?”</i> · "
-            "<i>“Compare the ProSim configs of both sims”</i> · <i>“What changed since v3?”</i> · "
-            "<i>“Suggest Prepar3D.cfg settings for an RTX 4080 at 3 projectors.”</i></p>")
-        intro.setWordWrap(True)
-        intro.setTextFormat(Qt.RichText)
-        lay.addWidget(intro)
+        lay.addWidget(hint(
+            "Claude (and ChatGPT) can read every tracked file, its history and versions, the rulebook and the other "
+            "sims' files — to troubleshoot problems and help dial in settings. They can also <b>propose</b> changes, "
+            "but nothing is written until you approve it here, and every applied change is recorded in History. "
+            "Try: <i>“Why do we get stutters on Sim 2 but not Sim 1?”</i> · <i>“What changed since v3?”</i>"))
 
-        box = self.claude_setup_box = QGroupBox("Setup")
-        bl = QHBoxLayout(box)
+        box, bl = section("Claude Desktop on this PC", QHBoxLayout)
+        self.claude_setup_box = box
         self.claude_status = QLabel()
         self.claude_status.setTextFormat(Qt.RichText)
+        self.claude_status.setWordWrap(True)
         bl.addWidget(self.claude_status, 1)
-        self.claude_connect_btn = QPushButton("Connect to Claude Desktop")
-        self.claude_connect_btn.clicked.connect(self.toggle_claude_connection)
+        self.claude_connect_btn = button("Connect", self.toggle_claude_connection, primary=True)
         bl.addWidget(self.claude_connect_btn)
-        b = QPushButton("Show manual setup")
-        b.clicked.connect(self.show_claude_manual)
-        bl.addWidget(b)
+        bl.addWidget(button("Manual setup…", self.show_claude_manual))
         lay.addWidget(box)
 
-        self.claude_allow = QCheckBox("Allow Claude to propose changes (you always approve before anything is written)")
-        self.claude_allow.setChecked(self.repo.get("claude_proposals") != "0")
-        self.claude_allow.toggled.connect(lambda v: self.repo.set("claude_proposals", "1" if v else "0"))
-        lay.addWidget(self.claude_allow)
-
-        # ---- network access (Claude Desktop on mechanics' laptops)
-        nbox = QGroupBox("Network access — Claude on other computers on this network (e.g. MacBooks)")
-        nl = QVBoxLayout(nbox)
+        nbox, nl = section("Network access — Claude, ChatGPT or the remote app on other computers (e.g. MacBooks)")
         row = QHBoxLayout()
         self.net_enable = QCheckBox("Allow connections from the local network")
         self.net_enable.setChecked(self.repo.get("net_enabled") == "1")
@@ -84,17 +74,14 @@ class AssistantsPage:
         setup_table(self.key_table, ["Person / computer", "Access", "Key created", "Last connected"], 0)
         self.key_table.setMaximumHeight(140)
         nl.addWidget(self.key_table)
-        row = QHBoxLayout()
-        for text, fn in (("Add person…", self.add_net_key), ("Remove access", self.remove_net_key),
-                         ("Setup for a Mac…", lambda: self.show_net_setup("mac")),
-                         ("Setup for a Windows laptop…", lambda: self.show_net_setup("windows")),
-                         ("Setup for ChatGPT (via a Mac)…", lambda: self.show_net_setup("chatgpt")),
-                         ("Setup for the remote app…", lambda: self.show_net_setup("app"))):
-            b = QPushButton(text)
-            b.clicked.connect(fn)
-            row.addWidget(b)
-        row.addStretch()
-        nl.addLayout(row)
+        setup = button("Setup instructions")
+        m = QMenu(setup)
+        m.addAction("Claude Desktop on a Mac…", lambda: self.show_net_setup("mac"))
+        m.addAction("Claude Desktop on a Windows laptop…", lambda: self.show_net_setup("windows"))
+        m.addAction("ChatGPT (through a Mac)…", lambda: self.show_net_setup("chatgpt"))
+        m.addAction("Remote app (this app on another computer)…", lambda: self.show_net_setup("app"))
+        setup.setMenu(m)
+        nl.addLayout(button_row(("Add person…", self.add_net_key), setup, ("Remove access…", self.remove_net_key)))
         lay.addWidget(nbox)
         self.net_server = None
         self._net_activity = []
@@ -106,14 +93,13 @@ class AssistantsPage:
         elif self.net_enable.isChecked():
             QTimer.singleShot(500, lambda: self.start_network(quiet=True))
 
-        row = QHBoxLayout()
-        row.addWidget(QLabel("<b>Changes proposed by Claude</b>"))
-        row.addStretch()
-        for text, fn in (("Review…", self.review_selected_proposal), ("Copy files for Claude…", self.copy_for_claude)):
-            b = QPushButton(text)
-            b.clicked.connect(fn)
-            row.addWidget(b)
-        lay.addLayout(row)
+        self.claude_allow = QCheckBox("Allow AI assistants to propose changes (you always approve before anything "
+                                      "is written)")
+        self.claude_allow.setChecked(self.repo.get("claude_proposals") != "0")
+        self.claude_allow.toggled.connect(lambda v: self.repo.set("claude_proposals", "1" if v else "0"))
+        lay.addLayout(button_row(heading("Proposed changes"), self.claude_allow,
+                                 trailing=[("Review…", self.review_selected_proposal),
+                                           ("Copy files for an AI chat…", self.copy_for_claude)]))
         self.prop_table = QTableWidget()
         setup_table(self.prop_table, ["Status", "When", "From", "File", "Reason"], 4)
         self.prop_table.doubleClicked.connect(lambda _i: self.review_selected_proposal())
@@ -131,17 +117,15 @@ class AssistantsPage:
             srv.start()
         except OSError as e:
             if not quiet:
-                QMessageBox.warning(self, APP_NAME, f"Could not open port {port}: {e}\nIs another program using it? "
-                                    "Pick another port.")
-            self.net_status.setText(f"<span style='color:#c62828'>Could not open port {port}: "
-                                    f"{html.escape(str(e))}</span>")
+                fail(self, f"open port {port}", e, "Is another program using it? Pick another port.")
+            self.net_status.setText(colored(f"✖ Could not open port {port}: {e}", BAD))
             return False
         self.net_server = srv
         ok, msg = net.set_firewall_rule(port, True)
         if not ok and not quiet:
-            QMessageBox.warning(self, APP_NAME, "The Windows Firewall rule could not be added (run the app as "
-                                f"administrator), so other computers may be blocked:\n{msg}")
-        self.repo.log(f"Network access for Claude switched on (port {port})")
+            fail(self, "add the Windows Firewall rule", msg, "Other computers may be blocked. Run the app as "
+                 "administrator.")
+        self.repo.log(f"Network access switched on (port {port})")
         self.refresh_network()
         return True
 
@@ -154,14 +138,14 @@ class AssistantsPage:
         self.repo.set("net_enabled", "1" if on else "0")
         if on:
             if not net.load_keys(self.repo):
-                QMessageBox.information(self, APP_NAME, "Network access is on. Now click 'Add person…' to create an "
-                                        "access key for each mechanic's laptop.")
+                inform(self, "Network access is on. Now click Add person… to create an access key for each "
+                             "laptop.")
             if not self.start_network():
                 self.net_enable.setChecked(False)
         else:
             self.stop_network()
             net.set_firewall_rule(self.net_port.value(), False)
-            self.repo.log("Network access for Claude switched off")
+            self.repo.log("Network access switched off")
         self.refresh_network()
 
     def change_net_port(self):
@@ -173,7 +157,7 @@ class AssistantsPage:
         if self.net_server:
             net.set_firewall_rule(old, False)
             self.start_network()
-            QMessageBox.information(self, APP_NAME, "Port changed — laptops need the new setup (Setup for a Mac…).")
+            inform(self, "Port changed. Every laptop needs the new setup (Setup instructions).")
 
     def net_urls(self) -> list[str]:
         port = self.net_port.value()
@@ -190,26 +174,25 @@ class AssistantsPage:
             self.net_server.keys = keys
             urls = self.net_urls()
             self.net_status.setText(
-                "<span style='color:#2e7d32'><b>✔ Listening.</b></span> Laptops connect to "
+                colored("✔ Listening.", OK, True) + " Laptops connect to "
                 + " or ".join(f"<b>{html.escape(u)}</b>" for u in urls[:2])
                 + ". Only computers on this local network are let through the firewall, and each needs its own key. "
                   "Tip: give this PC a fixed IP address (DHCP reservation in the router) so the setup keeps working.")
         elif self.remote:
-            self.net_status.setText("You are connected remotely. Network access is switched on/off at the sim PC; "
-                                    "people and keys can be managed here.")
+            self.net_status.setText("Network access is switched on and off at the sim PC itself; people and keys "
+                                    "can be managed here.")
         elif self.net_enable.isChecked():
             pass
         else:
-            self.net_status.setText("Off. Switch on to let Claude Desktop on a mechanic's laptop read this sim's "
-                                    "configs (and propose changes you approve here).")
+            self.net_status.setText("Off. Switch on to let Claude, ChatGPT or the remote app on another computer "
+                                    "work with this sim.")
         self.key_table.setRowCount(len(keys))
         for r, k in enumerate(keys):
             ls = seen.get(k["name"])
             self.key_table.setItem(r, 0, item(k["name"], k["key"], bold=True))
             lvl = net.key_level(k)
-            self.key_table.setItem(r, 1, item({"read": "Claude/ChatGPT read-only", "propose": "Claude/ChatGPT + propose",
-                                               "full": "Full control (remote app)"}[lvl],
-                                              color="#6a1b9a" if lvl == "full" else None, bold=lvl == "full"))
+            self.key_table.setItem(r, 1, item(net.ACCESS_SHORT[lvl], color="#6a1b9a" if lvl == "full" else None,
+                                              bold=lvl == "full"))
             self.key_table.setItem(r, 2, item(fmt_ts(k["created"])))
             self.key_table.setItem(r, 3, item(f"{fmt_ts(ls[0])} from {ls[1]}" if ls else "–"))
 
@@ -218,16 +201,18 @@ class AssistantsPage:
         if not ok or not name.strip():
             return
         if any(k["name"].lower() == name.strip().lower() for k in net.load_keys(self.repo)):
-            QMessageBox.warning(self, APP_NAME, "That name already has a key.")
+            warn(self, "That name already has a key. Use another name, or remove the old key first.")
             return
         levels = list(net.ACCESS_LEVELS.items())
-        choice, ok = QInputDialog.getItem(self, "Access", f"What may {name} do?", [v for _k, v in levels], 1, False)
+        choice, ok = QInputDialog.getItem(self, "Add person", f"What may {name} do?", [v for _k, v in levels], 1,
+                                          False)
         if not ok:
             return
         lvl = levels[[v for _k, v in levels].index(choice)][0]
-        if lvl == "full" and QMessageBox.question(
-                self, APP_NAME, f"Full control lets {name} change, restore and version every tracked file on this sim "
-                "from another computer (everything is logged with their name). Continue?") != QMessageBox.Yes:
+        if lvl == "full" and not confirm(self, f"Give {name} full control?", "Give full control",
+                                         details=f"{name} can change, restore and create versions of every tracked "
+                                                 "file on this sim from another computer. Everything is logged with "
+                                                 "their name."):
             return
         k = net.add_key(self.repo, name, lvl != "read", full_control=lvl == "full")
         self.repo.log(f"Network access key created for {k['name']} ({net.ACCESS_LEVELS[lvl]})")
@@ -245,8 +230,8 @@ class AssistantsPage:
             return
         keys = net.load_keys(self.repo)
         k = next(k for k in keys if k["key"] == ids[0])
-        if QMessageBox.question(self, APP_NAME, f"Remove access for {k['name']}? Their Claude can no longer "
-                                "connect.") == QMessageBox.Yes:
+        if confirm(self, f"Remove access for {k['name']}?", "Remove access", danger=True,
+                   details="Their key stops working immediately."):
             net.save_keys(self.repo, [x for x in keys if x["key"] != k["key"]])
             self.repo.log(f"Network access removed for {k['name']}")
             self.refresh_network()
@@ -254,7 +239,7 @@ class AssistantsPage:
     def show_net_setup(self, kind: str):
         keys = net.load_keys(self.repo)
         if not keys:
-            QMessageBox.information(self, APP_NAME, "First click 'Add person…' to create a key.")
+            inform(self, "First click Add person… to create a key.")
             return
         ids = selected_data(self.key_table)
         key = next((k for k in keys if ids and k["key"] == ids[0]), keys[-1])
@@ -265,33 +250,36 @@ class AssistantsPage:
         acts, self._net_activity[:] = list(self._net_activity), []
         for a in acts:
             self.repo.log(a)
-        if acts and self.tabs.currentWidget() is self.tab_claude and self.isVisible():
+        if acts and self.is_current("assistants"):
             self.refresh_network()
 
-    def refresh_claude(self):
+    def refresh_assistants(self):
         self.refresh_network()
         if self.remote:
             self.refresh_proposals_table()
             return
         connected = core.claude_desktop_connected()
         if connected:
-            self.claude_status.setText("<span style='color:#2e7d32'><b>✔ Connected to Claude Desktop.</b></span> "
-                                       "Restart Claude Desktop once after connecting. Look for "
-                                       "<b>sim-config-manager</b> under the tools (🔨) menu in a chat.")
+            self.claude_status.setText(colored("✔ Connected.", OK, True) + " Restart Claude Desktop once after "
+                                       "connecting, then look for <b>sim-config-manager</b> in a chat's tools menu.")
             self.claude_connect_btn.setText("Disconnect")
+            self.claude_connect_btn.setProperty("primary", False)
         else:
             self.claude_status.setText("Not connected. Install Claude Desktop (claude.ai/download) on this PC, then "
                                        "click <b>Connect</b>.")
-            self.claude_connect_btn.setText("Connect to Claude Desktop")
+            self.claude_connect_btn.setText("Connect")
+            self.claude_connect_btn.setProperty("primary", True)
+        self.claude_connect_btn.style().unpolish(self.claude_connect_btn)
+        self.claude_connect_btn.style().polish(self.claude_connect_btn)
         self.refresh_proposals_table()
 
     def refresh_proposals_table(self):
         props = list(reversed(core.list_proposals(self.repo)))
-        colors = {"pending": "#e65100", "applied": "#2e7d32", "rejected": "#777"}
+        style = {"pending": ("Waiting for approval", WARN), "applied": ("Applied", OK), "rejected": ("Rejected", MUTED)}
         self.prop_table.setRowCount(len(props))
         for r, p in enumerate(props):
-            self.prop_table.setItem(r, 0, item(p["status"], p["id"], colors.get(p["status"]),
-                                               bold=p["status"] == "pending"))
+            text, col = style.get(p["status"], (p["status"], None))
+            self.prop_table.setItem(r, 0, item(text, p["id"], col, bold=p["status"] == "pending"))
             self.prop_table.setItem(r, 1, item(fmt_ts(p["created"])))
             self.prop_table.setItem(r, 2, item(p.get("author", "Claude")))
             self.prop_table.setItem(r, 3, item(p["label"]))
@@ -302,21 +290,20 @@ class AssistantsPage:
         try:
             paths = core.connect_claude_desktop(self.repo.data_dir, enable)
         except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, APP_NAME, f"Could not update Claude Desktop's settings: {e}")
+            fail(self, "update Claude Desktop's settings", e)
             return
         cmd, _args = core.connector_command(self.repo.data_dir)
         if enable and getattr(sys, "frozen", False) and not os.path.exists(cmd):
-            QMessageBox.warning(self, APP_NAME, f"Put SimConfigManager-MCP.exe next to SimConfigManager.exe:\n{cmd}")
-        QMessageBox.information(
-            self, APP_NAME, ("Connected" if enable else "Disconnected") + ". Updated:\n" + "\n".join(paths) +
-            "\n\nQuit Claude Desktop completely (also from its tray icon) and start it again.")
-        self.refresh_claude()
+            warn(self, f"The connector is missing. Put SimConfigManager-MCP.exe next to SimConfigManager.exe:\n{cmd}")
+        inform(self, ("Connected" if enable else "Disconnected") + ". Updated:\n" + "\n".join(paths) +
+               "\n\nQuit Claude Desktop completely (also from its tray icon) and start it again.")
+        self.refresh_assistants()
 
     def show_claude_manual(self):
         cmd, args = core.connector_command(self.repo.data_dir)
         snippet = json.dumps({"mcpServers": {core.MCP_SERVER_KEY: {"command": cmd, "args": args}}}, indent=2)
         dlg = QDialog(self)
-        dlg.setWindowTitle("Manual setup")
+        dlg.setWindowTitle("Claude Desktop — manual setup")
         dlg.resize(720, 360)
         lay = QVBoxLayout(dlg)
         lay.addWidget(QLabel("In Claude Desktop: Settings → Developer → Edit Config, and add this to "
@@ -325,9 +312,7 @@ class AssistantsPage:
         t.setPlainText(snippet)
         t.setFont(theme.mono_font(10))
         lay.addWidget(t)
-        b = QPushButton("Copy")
-        b.clicked.connect(lambda: QApplication.clipboard().setText(snippet))
-        lay.addWidget(b)
+        lay.addLayout(button_row(("Copy", lambda: QApplication.clipboard().setText(snippet))))
         dlg.exec()
 
     def check_proposals(self, startup: bool = False):
@@ -343,12 +328,11 @@ class AssistantsPage:
         if new:
             p = new[-1]
             self.tray.showMessage(f"{p.get('author', 'Claude')} proposes a change to {p['label']}",
-                                  p["reason"][:180] + "\n\nOpen Sim Config Manager → Claude to review.",
+                                  p["reason"][:180] + "\n\nOpen SimConfigManager → AI & network to review.",
                                   QSystemTrayIcon.Information, 15000)
-            if self.tabs.currentWidget() is self.tab_claude and self.isVisible():
-                self.refresh_claude()
-        self.tabs.setTabText(self.tabs.indexOf(self.tab_claude), f"Claude ({len(pend)})" if pend else "Claude")
-        self.sync_activity()
+            if self.is_current("assistants"):
+                self.refresh_assistants()
+        self.set_badge("assistants", len(pend))
 
     def review_selected_proposal(self):
         ids = selected_data(self.prop_table)
@@ -357,7 +341,7 @@ class AssistantsPage:
         if prop is None:
             prop = next((p for p in reversed(pend) if p["status"] == "pending"), None)
         if prop is None:
-            QMessageBox.information(self, APP_NAME, "There are no proposals to review.")
+            inform(self, "There are no proposed changes to review.")
             return
         ProposalDialog(self.repo, prop, self).exec()
         self.sync_dirty = True
@@ -366,16 +350,16 @@ class AssistantsPage:
 
     def copy_for_claude(self):
         files = []
-        if self.tabs.currentWidget() is self.tab_files:
+        if self.current_page() == "files":
             files = [self.repo.file(i) for i in selected_data(self.files_table)]
         if not files:
             names = [f"{f.display}  [{f.group}]" for f in self.repo.files()]
             dlg = QDialog(self)
-            dlg.setWindowTitle("Copy files for Claude")
+            dlg.setWindowTitle("Copy files for an AI chat")
             dlg.resize(560, 480)
             lay = QVBoxLayout(dlg)
-            lay.addWidget(QLabel("Tick the files to copy. Paste the result into any Claude chat "
-                                 "(also on your phone or claude.ai)."))
+            lay.addWidget(hint("Tick the files to copy, then paste into any Claude or ChatGPT chat (also on your "
+                               "phone)."))
             lst = QListWidget()
             for f, n in zip(self.repo.files(), names):
                 it = QListWidgetItem(n)
@@ -397,5 +381,4 @@ class AssistantsPage:
             return
         md = core.files_as_markdown(self.repo, files)
         QApplication.clipboard().setText(md)
-        self.statusBar().showMessage(f"Copied {len(files)} file(s) for Claude ({len(md):,} characters) — paste "
-                                     "into a Claude chat.", 8000)
+        self.notify(f"Copied {len(files)} file(s) ({len(md):,} characters) — paste them into an AI chat")

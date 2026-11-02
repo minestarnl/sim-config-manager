@@ -9,3 +9,4 @@
 from .common import make_icon, make_icon_remote  # noqa: F401
 from .connect import open_connect_dialog  # noqa: F401
 from .window import MainWindow  # noqa: F401
+__all__ = ["MainWindow", "make_icon", "make_icon_remote", "open_connect_dialog"]

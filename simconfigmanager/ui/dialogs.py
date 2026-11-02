@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -12,16 +13,17 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-    QFormLayout, QHBoxLayout, QInputDialog, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-    QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QFormLayout, QHBoxLayout, QInputDialog, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .. import core, net, theme
 from ..theme import TLabel as QLabel, TTextEdit as QTextEdit  # theme-aware versions
-from ..core import (APP_NAME, Repo, Rule, RULE_HELP, RULE_KINDS, fmt_ts)
+from ..core import (Repo, Rule, RULE_HELP, RULE_KINDS, fmt_ts)
 
 
-from .common import item, setup_table
+from .common import (BAD, INFO, MUTED, OK, WARN, banner, button, button_row, colored, diff_html, fail, heading,
+                     hint, inform, item, setup_table, warn)
 
 class RemoteFileDialog(QDialog):
     """Browse the sim PC's disk from the remote app (folders + file names only)."""
@@ -62,7 +64,7 @@ class RemoteFileDialog(QDialog):
         try:
             d = self.repo.list_dir(path)
         except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, APP_NAME, str(e))
+            fail(self, "open that folder on the sim", e)
             return
         self.cur = d
         self.path.setText(d["path"])
@@ -138,7 +140,7 @@ class DiffDialog(QDialog):
         self.resize(1000, 680)
         lay = QVBoxLayout(self)
         if summary:
-            lay.addWidget(QLabel(f"<b>Setting changes ({len(summary)})</b>"))
+            lay.addWidget(heading(f"Setting changes ({len(summary)})"))
             self.sum_list = QListWidget()
             self.sum_list.setMaximumHeight(170)
             colors = {"added": "#1b5e20", "removed": "#b71c1c", "changed": "#e65100"}
@@ -149,34 +151,16 @@ class DiffDialog(QDialog):
                 self.sum_list.addItem(it)
             lay.addWidget(self.sum_list)
             if ignore_cb:
-                row = QHBoxLayout()
-                b = QPushButton("Ignore the selected setting from now on…")
-                b.setToolTip("For values the sim rewrites by itself (e.g. window positions): changes to them will no "
-                             "longer count as changes or trigger alerts.")
-                b.clicked.connect(lambda: [ignore_cb(it.data(Qt.UserRole)) for it in self.sum_list.selectedItems()[:1]])
-                row.addWidget(b)
-                row.addStretch()
-                lay.addLayout(row)
-            lay.addWidget(QLabel("<b>Line by line</b>"))
+                lay.addLayout(button_row(button(
+                    "Ignore the selected setting from now on…",
+                    lambda: [ignore_cb(it.data(Qt.UserRole)) for it in self.sum_list.selectedItems()[:1]],
+                    tip="For values the sim rewrites by itself (e.g. window positions): changes to them no longer "
+                        "count as changes or trigger alerts.")))
+            lay.addWidget(heading("Line by line"))
         view = QTextEdit()
         view.setReadOnly(True)
         view.setFont(theme.mono_font(10))
-        if not diff_text.strip():
-            diff_text = "(no differences)"
-        lines = []
-        for ln in diff_text.splitlines():
-            esc = html.escape(ln) or "&nbsp;"
-            if ln.startswith("+++") or ln.startswith("---"):
-                lines.append(f"<span style='color:#555;font-weight:bold'>{esc}</span>")
-            elif ln.startswith("@@"):
-                lines.append(f"<span style='color:#6a1b9a'>{esc}</span>")
-            elif ln.startswith("+"):
-                lines.append(f"<span style='background:#e6ffed;color:#1b5e20'>{esc}</span>")
-            elif ln.startswith("-"):
-                lines.append(f"<span style='background:#ffeef0;color:#b71c1c'>{esc}</span>")
-            else:
-                lines.append(esc)
-        view.setHtml("<pre style='font-family:Consolas,monospace'>" + "<br>".join(lines) + "</pre>")
+        view.setHtml(diff_html(diff_text))
         lay.addWidget(view)
         bb = QDialogButtonBox(QDialogButtonBox.Close)
         bb.rejected.connect(self.reject)
@@ -207,21 +191,21 @@ class RuleDialog(QDialog):
         self.rp_combo.addItems([rp.name for rp in repo.restore_points()])
         self.expected = QLineEdit(self.rule.expected)
         self.action = QComboBox()
-        self.action.addItem("Notify only", "notify")
-        self.action.addItem("Notify AND automatically undo the change", "revert")
+        self.action.addItem("Notify", "notify")
+        self.action.addItem("Notify and undo the change automatically", "revert")
         self.action.setCurrentIndex(max(self.action.findData(self.rule.action), 0))
-        self.enabled = QCheckBox("Enabled")
+        self.enabled = QCheckBox("On")
         self.enabled.setChecked(self.rule.enabled)
         self.help = QLabel()
         self.help.setWordWrap(True)
-        self.help.setStyleSheet("color:#555")
-        form.addRow("Name", self.name)
-        form.addRow("File", self.file)
-        form.addRow("Trigger", self.kind)
-        form.addRow("Pattern", self.pattern)
-        form.addRow("Restore point", self.rp_combo)
-        form.addRow("Expected value", self.expected)
-        form.addRow("Action", self.action)
+        self.help.setProperty("hint", True)
+        form.addRow("Name:", self.name)
+        form.addRow("File:", self.file)
+        form.addRow("When:", self.kind)
+        form.addRow("Pattern:", self.pattern)
+        form.addRow("Restore point:", self.rp_combo)
+        form.addRow("Expected value:", self.expected)
+        form.addRow("Then:", self.action)
         form.addRow("", self.enabled)
         form.addRow("", self.help)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -243,10 +227,10 @@ class RuleDialog(QDialog):
     def accept_rule(self):
         k = self.kind.currentData()
         if k in ("line_added", "line_removed", "ini_value", "xml_value") and not self.pattern.text().strip():
-            QMessageBox.warning(self, APP_NAME, "This trigger needs a pattern.")
+            warn(self, "This kind of rule needs a pattern.")
             return
         if k == "differs_from_rp" and not self.rp_combo.currentText():
-            QMessageBox.warning(self, APP_NAME, "Create a restore point first.")
+            warn(self, "Save a restore point first (Restore points page).")
             return
         r = self.rule
         r.name = self.name.text().strip() or self.kind.currentText()
@@ -263,10 +247,10 @@ class RuleDialog(QDialog):
 class DiscoverDialog(QDialog):
     def __init__(self, candidates, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Found sim config files")
+        self.setWindowTitle("Prepar3D / ProSim config files found")
         self.resize(900, 520)
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("Tick the files to track. Group names can be edited later (e.g. 'Sim 1 – P3D v5')."))
+        lay.addWidget(hint("Tick the files to track. Group names can be changed later (e.g. 'Sim 1 – P3D v5')."))
         self.list = QListWidget()
         for label, group, path in candidates:
             it = QListWidgetItem(f"[{group}]  {label}    —  {path}")
@@ -301,13 +285,13 @@ class DiscoverDialog(QDialog):
 class ExportArchiveDialog(QDialog):
     def __init__(self, repo: Repo, name: str, current: bool, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Export archive")
+        self.setWindowTitle("Export certification archive")
         self.resize(640, 260)
         form = QFormLayout(self)
-        what = "all monitored files as they are now" if current else f"the files in '{name}'"
-        form.addRow(QLabel(f"Creates one zip with {what}, a REPORT.txt with paths, dates and SHA-256 checksums "
-                           "(for certification), and a .sha256 file to prove the zip was not changed later."))
-        stamp = core.time.strftime("%Y-%m-%d_%H%M")
+        what = "every tracked file as it is now" if current else f"the files in '{name}'"
+        form.addRow(hint(f"Creates one zip with {what}, a REPORT.txt with paths, dates and SHA-256 checksums "
+                         "(for certification), and a .sha256 file that proves the zip was not changed later."))
+        stamp = time.strftime("%Y-%m-%d_%H%M")
         start_dir = (parent.pref("last_archive_dir") if parent is not None and hasattr(parent, "pref")
                      else repo.get("last_archive_dir"))
         default = os.path.join(start_dir or str(Path.home() / "Documents"),
@@ -321,20 +305,21 @@ class ExportArchiveDialog(QDialog):
         row.addWidget(b)
         holder = QWidget()
         holder.setLayout(row)
-        form.addRow("Save to", holder)
+        form.addRow("Save to:", holder)
         self.note = QLineEdit()
         self.note.setPlaceholderText("e.g. 'Annual certification 2026 – inspector J. Smith'")
-        form.addRow("Note (in report)", self.note)
-        self.hist = QCheckBox("Include full history, restore points and alert rules "
+        form.addRow("Note (in the report):", self.note)
+        self.hist = QCheckBox("Include the full history, versions, restore points and rules "
                               "(lets you rebuild everything on another PC)")
         self.hist.setChecked(True)
         form.addRow("", self.hist)
-        self.upload = QCheckBox("Also upload to the shared location (Google Drive / sync folder) → archives")
+        self.upload = QCheckBox("Also upload to the shared location (archives folder)")
         has_sync = (repo.get("sync_mode") or ("folder" if repo.get("sync_folder") else "")) not in ("", "off")
         self.upload.setEnabled(has_sync)
         self.upload.setChecked(has_sync and repo.get("archive_upload") != "0")
         form.addRow("", self.upload)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Export")
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         form.addRow(bb)
@@ -357,23 +342,23 @@ class ImportArchiveDialog(QDialog):
         super().__init__(parent)
         self.repo, self.arc = repo, arc
         idx = arc.index
-        self.setWindowTitle("Import archive")
+        self.setWindowTitle("Import certification archive")
         self.resize(1100, 600)
         lay = QVBoxLayout(self)
         v = arc.verify()
-        bad = f"<span style='color:#c62828'><b>{len(v['bad'])} damaged: {', '.join(v['bad'])}</b></span>" \
-            if v["bad"] else "<span style='color:#2e7d32'>all files OK</span>"
+        bad = colored(f"{len(v['bad'])} damaged: {', '.join(v['bad'])}", BAD, True) if v["bad"] \
+            else colored("all files OK", OK)
         zc = v["zip_check"]
-        zcol = "#2e7d32" if zc == "matches" else ("#c62828" if "NOT" in zc else "#555")
+        zcol = OK if zc == "matches" else (BAD if "NOT" in zc else MUTED)
         lay.addWidget(QLabel(
             f"<b>{html.escape(os.path.basename(arc.path))}</b><br>"
             f"From <b>{html.escape(idx.get('machine', '?'))}</b>, created {fmt_ts(idx.get('created', 0))}"
             f"{' — ' + html.escape(idx['note']) if idx.get('note') else ''}<br>"
             f"Checksums: {v['ok']} verified, {bad} · zip checksum: <span style='color:{zcol}'>{zc}</span>"))
-        lay.addWidget(QLabel("Check the target paths (double-click a target to change it). "
-                             "User-folder paths were translated to this PC automatically."))
+        lay.addWidget(hint("Check the target paths (double-click a target to change it). User-folder paths were "
+                           "translated to this PC automatically."))
         self.table = QTableWidget()
-        setup_table(self.table, ["Import", "Name", "Group", "Original path", "Target on this PC"], 4)
+        setup_table(self.table, ["Import", "Name", "Group", "Original path", "Target on this sim"], 4)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         files = [e for e in arc.files if e.get("zip")]
         remote = core.is_remote(repo)
@@ -390,14 +375,14 @@ class ImportArchiveDialog(QDialog):
             self.table.setItem(r, 3, item(e["path"]))
             tgt = remote_targets[r] if remote else arc.suggested_target(e)
             exists = True if remote else os.path.exists(tgt)
-            self.table.setItem(r, 4, item(tgt, color=None if exists else "#1565c0"))
+            self.table.setItem(r, 4, item(tgt, color=None if exists else INFO))
         self.table.cellDoubleClicked.connect(self.edit_target)
         lay.addWidget(self.table)
-        self.write = QCheckBox("Write the files to the target paths (overwrites; safety snapshot taken first)")
+        self.write = QCheckBox("Write the files to the target paths (overwrites them; a safety copy is recorded first)")
         self.write.setChecked(True)
-        self.track = QCheckBox("Keep monitoring these files on this PC")
+        self.track = QCheckBox("Track these files on this sim")
         self.track.setChecked(True)
-        self.hist = QCheckBox("Also import full history, restore points and alert rules")
+        self.hist = QCheckBox("Also import the full history, versions, restore points and rules")
         empty = not repo.snapshots(1)
         self.hist.setEnabled(arc.has_history and empty)
         self.hist.setChecked(arc.has_history and empty)
@@ -452,7 +437,7 @@ class CreateVersionDialog(QDialog):
             intro = (f"<b>{len(mism)} file(s) changed since {html.escape(latest.label)}.</b> "
                      f"v{number} will record all {len(repo.files())} tracked files as they are now.")
         else:
-            intro = (f"<span style='color:#e65100'>Nothing changed since {html.escape(latest.label)}.</span> "
+            intro = (colored(f"Nothing changed since {latest.label}.", WARN) + " "
                      "You can still create a version (e.g. to mark an inspection).")
         lab = QLabel(intro)
         lab.setWordWrap(True)
@@ -465,17 +450,14 @@ class CreateVersionDialog(QDialog):
             lay.addWidget(lst)
         running = repo.running_sim_processes()
         if running:
-            w = QLabel("⚠ Running now: " + ", ".join(running) + ". P3D rewrites Prepar3D.cfg when it exits — "
-                       "it is safer to create the version with the sim closed.")
-            w.setWordWrap(True)
-            w.setStyleSheet("background:#fff3cd; color:#664d03; padding:6px")
-            lay.addWidget(w)
+            lay.addWidget(banner("⚠ Running now: " + html.escape(", ".join(running)) + ". Prepar3D rewrites "
+                                 "Prepar3D.cfg when it exits — it is safer to create the version with the sim closed."))
         form = QFormLayout()
         self.title = QLineEdit()
         self.title.setPlaceholderText("e.g. 'ProSim 3.30 update + new display settings'")
-        form.addRow("Title", self.title)
+        form.addRow("Title:", self.title)
         self.by = QLineEdit(repo.get("version_author") or os.environ.get("USERNAME", ""))
-        form.addRow("Created by", self.by)
+        form.addRow("Created by:", self.by)
         lay.addLayout(form)
         lay.addWidget(QLabel("Release notes (pre-filled with what changed — edit freely):"))
         self.notes = QTextEdit()
@@ -490,7 +472,7 @@ class CreateVersionDialog(QDialog):
 
     def check(self):
         if not self.by.text().strip():
-            QMessageBox.warning(self, APP_NAME, "Please fill in who is creating this version.")
+            warn(self, "Fill in who is creating this version.")
             return
         self.accept()
 
@@ -516,7 +498,7 @@ class RulebookDialog(QDialog):
         self.setting.setEditable(True)
         self.file.currentIndexChanged.connect(self.fill_settings)
         self.current = QLabel()
-        self.current.setStyleSheet("color:#555")
+        self.current.setProperty("hint", True)
         self.setting.currentTextChanged.connect(self.show_current)
         self.required = QLineEdit(self.entry.get("required", ""))
         self.required.setPlaceholderText("leave empty for a note only")
@@ -525,17 +507,14 @@ class RulebookDialog(QDialog):
         self.note.setPlainText(self.entry.get("note", ""))
         self.note.setMaximumHeight(90)
         self.author = QLineEdit(self.entry.get("author") or repo.get("version_author") or os.environ.get("USERNAME", ""))
-        form.addRow("File", self.file)
-        form.addRow("Setting", self.setting)
+        form.addRow("File:", self.file)
+        form.addRow("Setting:", self.setting)
         form.addRow("", self.current)
-        form.addRow("Required value", self.required)
-        form.addRow("Note / why", self.note)
-        form.addRow("By", self.author)
-        hint = QLabel("CFG/INI: <i>Section/Key</i> (e.g. GRAPHICS/TEXTURE_MAX_LOAD). XML: element path, "
-                      "optionally @attribute (e.g. .//Server@ip).")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color:#555")
-        form.addRow("", hint)
+        form.addRow("Required value:", self.required)
+        form.addRow("Why:", self.note)
+        form.addRow("By:", self.author)
+        form.addRow("", hint("CFG/INI: <i>Section/Key</i> (e.g. GRAPHICS/TEXTURE_MAX_LOAD). XML: element path, "
+                             "optionally @attribute (e.g. .//Server@ip)."))
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.save)
         bb.rejected.connect(self.reject)
@@ -579,7 +558,7 @@ class RulebookDialog(QDialog):
     def save(self):
         sel = self.setting.currentText().strip()
         if not sel:
-            QMessageBox.warning(self, APP_NAME, "Fill in the setting.")
+            warn(self, "Fill in the setting.")
             return
         self.entry.update(file_id=self.file.currentData(), selector=sel, required=self.required.text().strip(),
                           note=self.note.toPlainText().strip(), author=self.author.text().strip())
@@ -593,8 +572,9 @@ class NetSetupDialog(QDialog):
     def __init__(self, sim_name: str, key: dict, urls: list[str], kind: str, parent=None):
         super().__init__(parent)
         self.sim_name, self.key, self.kind = sim_name, key, kind
-        self.setWindowTitle(f"Setup for {key['name']} (" + {"mac": "Claude on a Mac", "windows": "Claude on a Windows "
-                            "laptop", "chatgpt": "ChatGPT via a Mac", "app": "remote app"}[kind] + ")")
+        self.setWindowTitle(f"Setup for {key['name']} — " + {"mac": "Claude Desktop on a Mac",
+                            "windows": "Claude Desktop on a Windows laptop", "chatgpt": "ChatGPT through a Mac",
+                            "app": "remote app"}[kind])
         self.resize(820, 600)
         lay = QVBoxLayout(self)
         if kind == "mac":
@@ -608,10 +588,11 @@ class NetSetupDialog(QDialog):
                      "Nothing needs to be installed on the Mac — it uses the built-in <i>bash</i> and <i>curl</i>.")
         elif kind == "app":
             steps = ("Lets this person run <b>Sim Config Manager on their own PC or Mac</b> and work on this sim over "
-                     "the network — edit files, restore, create versions, review Claude's proposals — as if sitting "
+                     "the network — edit files, restore, create versions, review proposed changes — as if sitting "
                      "here. Everything is logged with their name." +
-                     ("" if key.get("full_control") else "<br><b style='color:#c62828'>This person's key is not "
-                      "'Full control'. Remove and add them again with Full control.</b>") +
+                     ("" if key.get("full_control") else "<br>" + colored("This person's key is not 'Full control'. "
+                                                                        "Remove and add them again with Full control.",
+                                                                        BAD, True)) +
                      "<ol><li><b>Windows:</b> install with the normal installer and start <i>Sim Config Manager – "
                      "connect to a sim</i>. <b>Mac:</b> download <i>SimConfigManager-mac.zip</i> from the release, "
                      "unzip, move to Applications, then right-click → Open the first time.</li>"
@@ -656,25 +637,11 @@ class NetSetupDialog(QDialog):
         self.text.setReadOnly(True)
         self.text.setFont(theme.mono_font(9))
         lay.addWidget(self.text, 1)
-        warn = QLabel("⚠ This contains the access key for <b>" + html.escape(key["name"]) + "</b>. Send it "
-                      "privately (e.g. AirDrop or a direct message), not in a group chat. Remove the person in the "
-                      "Claude tab to revoke it.")
-        warn.setWordWrap(True)
-        warn.setTextFormat(Qt.RichText)
-        warn.setStyleSheet("background:#fff3cd; color:#664d03; padding:6px")
-        lay.addWidget(warn)
-        row = QHBoxLayout()
-        b = QPushButton("Copy to clipboard")
-        b.clicked.connect(lambda: QApplication.clipboard().setText(self.content()))
-        row.addWidget(b)
-        b = QPushButton("Save as file…")
-        b.clicked.connect(self.save_file)
-        row.addWidget(b)
-        row.addStretch()
-        b = QPushButton("Close")
-        b.clicked.connect(self.accept)
-        row.addWidget(b)
-        lay.addLayout(row)
+        lay.addWidget(banner("⚠ This contains the access key for <b>" + html.escape(key["name"]) + "</b>. Send it "
+                             "privately (e.g. AirDrop or a direct message), not in a group chat. To revoke it, remove "
+                             "the person on the AI &amp; network page."))
+        lay.addLayout(button_row(("Copy to clipboard", lambda: QApplication.clipboard().setText(self.content())),
+                                 ("Save as file…", self.save_file), trailing=[("Close", self.accept)]))
         self.update_text()
 
     def config(self) -> dict:
@@ -726,48 +693,30 @@ class ProposalDialog(QDialog):
         f = repo.file(prop["file_id"])
         cur = repo.read_current(f) if f else None
         new = core.proposal_data(prop)
+        status = {"pending": "waiting for approval", "applied": "applied", "rejected": "rejected"}.get(prop["status"],
+                                                                                                    prop["status"])
         head = QLabel(f"<b>{html.escape(prop['label'])}</b> — {html.escape(prop['path'])}<br>"
                       f"Proposed {fmt_ts(prop['created'])} by <b>{html.escape(prop.get('author', 'Claude'))}</b>"
-                      f" · status: <b>{prop['status']}</b>")
+                      f" · {status}")
         head.setTextFormat(Qt.RichText)
         lay.addWidget(head)
-        reason = QLabel("<b>Reason given:</b><br>" + html.escape(prop["reason"]).replace("\n", "<br>"))
-        reason.setWordWrap(True)
-        reason.setTextFormat(Qt.RichText)
-        reason.setStyleSheet("background:#eef4fb; padding:8px; border-radius:4px")
-        lay.addWidget(reason)
+        lay.addWidget(banner("<b>Why:</b><br>" + html.escape(prop["reason"]).replace("\n", "<br>"), "info"))
         warns = []
         if f is None:
             warns.append("This file is no longer tracked.")
         elif (core.sha256_bytes(cur) if cur is not None else None) != prop.get("base_hash"):
-            warns.append("⚠ The file changed after Claude read it. The diff below compares the file as it is NOW "
-                         "with Claude's version — applying would also undo those newer changes.")
+            warns.append("⚠ The file changed after the assistant read it. The comparison below is between the file "
+                         "as it is now and the proposal — applying would also undo those newer changes.")
         running = repo.running_sim_processes()
         if running:
             warns.append("⚠ Running now: " + ", ".join(running) + ". Prepar3D rewrites Prepar3D.cfg when it exits; "
                          "apply with the sim closed.")
         for wtxt in warns:
-            lab = QLabel(wtxt)
-            lab.setWordWrap(True)
-            lab.setStyleSheet("background:#fff3cd; color:#664d03; padding:6px")
-            lay.addWidget(lab)
+            lay.addWidget(banner(html.escape(wtxt)))
         view = QTextEdit()
         view.setReadOnly(True)
         view.setFont(theme.mono_font(10))
-        out = []
-        for ln in core.unified_diff(cur, new, "now", "proposed").splitlines():
-            e = html.escape(ln) or "&nbsp;"
-            if ln.startswith(("+++", "---")):
-                out.append(f"<b style='color:#555'>{e}</b>")
-            elif ln.startswith("@@"):
-                out.append(f"<span style='color:#6a1b9a'>{e}</span>")
-            elif ln.startswith("+"):
-                out.append(f"<span style='background:#e6ffed;color:#1b5e20'>{e}</span>")
-            elif ln.startswith("-"):
-                out.append(f"<span style='background:#ffeef0;color:#b71c1c'>{e}</span>")
-            else:
-                out.append(e)
-        view.setHtml("<pre>" + "<br>".join(out) + "</pre>")
+        view.setHtml(diff_html(core.unified_diff(cur, new, "on disk now", "proposed")))
         lay.addWidget(view, 1)
         row = QHBoxLayout()
         row.addWidget(QLabel("Approved by:"))
@@ -775,30 +724,23 @@ class ProposalDialog(QDialog):
         row.addWidget(self.by)
         row.addStretch()
         if prop["status"] == "pending" and f is not None:
-            b = QPushButton("✔ Apply change")
-            b.setStyleSheet("QPushButton { background:#2e7d32; color:white; font-weight:bold; padding:6px 14px; }")
-            b.clicked.connect(self.apply)
-            row.addWidget(b)
-            b = QPushButton("✖ Reject")
-            b.clicked.connect(self.reject_prop)
-            row.addWidget(b)
-        b = QPushButton("Close")
-        b.clicked.connect(self.reject)
-        row.addWidget(b)
+            row.addWidget(button("Apply change", self.apply, primary=True, icon="check"))
+            row.addWidget(button("Reject…", self.reject_prop, danger=True))
+        row.addWidget(button("Close", self.reject))
         lay.addLayout(row)
 
     def apply(self):
         try:
             core.apply_proposal(self.repo, self.prop, self.by.text().strip())
         except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, APP_NAME, f"Could not apply: {e}")
+            fail(self, "apply the change", e)
             return
-        QMessageBox.information(self, APP_NAME, "Applied and recorded in History. Tell Claude it's done — it can "
-                                "read the file again to check.")
+        inform(self, "Applied and recorded in History. Tell the assistant it's done — it can read the file again "
+                     "to check.")
         self.accept()
 
     def reject_prop(self):
-        note, ok = QInputDialog.getText(self, APP_NAME, "Why not? (optional — Claude can see this)")
+        note, ok = QInputDialog.getText(self, "Reject", "Why not? (optional — the assistant can see this)")
         if not ok:
             return
         core.reject_proposal(self.repo, self.prop, note)

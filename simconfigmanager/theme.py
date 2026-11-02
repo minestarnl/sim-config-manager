@@ -28,6 +28,11 @@ ICONS = {  # codicon code points
     "rulebook": 0xEB12, "alerts": 0xEAA2, "cloud": 0xEBAA, "claude": 0xEC10, "settings": 0xEB51,
     "chevron": 0xEAB4, "check": 0xEAB2, "remote": 0xEB3A, "plug": 0xEB2D, "warning": 0xEA6C,
     "broadcast": 0xEAAD, "dot": 0xEA71, "tag": 0xEA66, "compare": 0xEAFD, "save": 0xEB4B, "refresh": 0xEB37,
+    "add": 0xEA60, "edit": 0xEA73, "trash": 0xEA81, "export": 0xEBAC, "upload": 0xEAC3, "pulse": 0xEB31,
+    "dashboard": 0xEACD, "hardware": 0xEABE, "health": 0xEB05, "tools": 0xEB6D, "record": 0xEBA7,
+    "play": 0xEB2C, "beaker": 0xEA79, "book": 0xEAA4, "package": 0xEB29, "shield": 0xEB53,
+    "phone": 0xEADB, "checklist": 0xEAB3, "calendar": 0xEAB0, "graph": 0xEB03, "person": 0xEA67,
+    "layers": 0xEBD2, "verified": 0xEB77, "zip": 0xEAEF, "notebook": 0xEBAF, "flame": 0xEAF2,
 }
 
 DARK = {
@@ -330,6 +335,8 @@ QPushButton:pressed {{ background: {t['input_border']}; }}
 QPushButton:default, QPushButton[primary="true"] {{ background: {t['primary']}; color: #ffffff;
     border-color: {t['primary']}; }}
 QPushButton:default:hover, QPushButton[primary="true"]:hover {{ background: {t['primary_hover']}; }}
+QPushButton[danger="true"] {{ color: {t['red']}; }}
+QPushButton[danger="true"]:hover {{ background: {t['red']}; color: #ffffff; border-color: {t['red']}; }}
 QPushButton:disabled {{ color: {t['faint']}; background: {t['bg']}; border-color: {t['border']}; }}
 QToolButton {{ background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 3px 6px;
     color: {t['fg']}; }}
@@ -397,4 +404,8 @@ QScrollBar::handle:hover {{ background: {t['scroll_hover']}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 QMessageBox QLabel {{ min-width: 280px; }}
+QLabel[hint="true"] {{ color: {t['muted']}; }}
+QLabel[heading="true"] {{ color: {t['fg_strong']}; font-weight: 600; font-size: 14px; }}
+QLabel[banner="true"] {{ background: {t['panel']}; border: 1px solid {t['border']}; border-radius: 6px;
+    padding: 10px 12px; }}
 """
