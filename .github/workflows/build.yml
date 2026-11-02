@@ -116,7 +116,7 @@ jobs:
         run: npm test
       - name: Package the hub
         run: |
-          v=$(grep -oP 'APP_VERSION = "\K[^"]+' simconfigmanager/core.py)
+          v=$(grep -oP 'APP_VERSION = "\K[^"]+' simconfigmanager/core/util.py)
           mkdir -p dist && cd hub && zip -r "../dist/SimConfigManager-Hub-$v.zip" package.json config.example.json \
             Dockerfile scm-hub.service src public
       - uses: actions/upload-artifact@v4
@@ -149,7 +149,7 @@ jobs:
           if gh release view "v${{ needs.windows.outputs.version }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
 
-      # Published the first time a new APP_VERSION (simconfigmanager/core.py) reaches main, or for a v* tag.
+      # Published the first time a new APP_VERSION (simconfigmanager/core/util.py) reaches main, or for a v* tag.
       # Existing releases are never overwritten.
       - name: Publish release
         if: >-

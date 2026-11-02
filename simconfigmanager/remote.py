@@ -87,7 +87,7 @@ ALLOWED = {
     # rules, ignores, rulebook, events
     "rules", "save_rule", "delete_rule", "ignores", "add_ignore", "delete_ignore", "rulebook", "save_rulebook_entry",
     "delete_rulebook_entry", "rulebook_status", "events", "clear_events", "log",
-    # server-side helpers (core.py, "server-side operations for remote mode")
+    # server-side helpers (core/remote_ops.py)
     "read_path", "write_path", "list_dir", "host_info", "drive_file_status", "save_drive_file",
     "export_archive_bytes", "import_archive_bytes", "expand_portable", "sync_configured", "sync_call",
     "list_proposals", "apply_proposal", "reject_proposal", "build_status", "discover", "build_hub_report",

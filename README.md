@@ -54,7 +54,7 @@ against `SHA256SUMS.txt`, installs it silently and restarts the app. No GitHub t
 repository is public); the *GitHub access token* setting is only for private forks.
 Every push to `main` is also built automatically: *Actions* tab → latest run → *Artifacts*.
 
-To publish a new release, raise `APP_VERSION` in `simconfigmanager/core.py` and push to `main` — the build
+To publish a new release, raise `APP_VERSION` in `simconfigmanager/core/util.py` and push to `main` — the build
 publishes `v<version>` automatically (existing releases are never overwritten).
 
 ## Install (on each sim PC)

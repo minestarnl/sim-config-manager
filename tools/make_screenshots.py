@@ -14,7 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-OUT = ROOT / "docs" / "screenshots"
+OUT = Path(os.environ.get("SCM_SHOTS_OUT") or ROOT / "docs" / "screenshots")
 OUT.mkdir(parents=True, exist_ok=True)
 
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox, QTableWidget  # noqa: E402
@@ -23,6 +23,7 @@ app = QApplication(sys.argv)
 from simconfigmanager import theme  # noqa: E402
 theme.init(app, os.environ.get("SCM_THEME", "dark"))
 from simconfigmanager import core, editor, gui  # noqa: E402
+from simconfigmanager.ui import connect as gui_connect, dialogs as gui_dialogs  # noqa: E402,F401
 from simconfigmanager.core import Repo, Rule  # noqa: E402
 
 os.environ["USERNAME"] = "Sim Tech"
@@ -366,7 +367,7 @@ from simconfigmanager import remote  # noqa: E402
 remote.save_connections([{"name": "Sim 1", "url": "192.168.10.11", "key": "x"},
                          {"name": "Sim 2", "url": "192.168.10.12", "key": "x"},
                          {"name": "Sim 3", "url": "sim3.local", "key": "x"}])
-cd = gui.ConnectDialog(w)
+cd = gui_connect.ConnectDialog(w)
 cd.resize(620, 360)
 shot(cd, "remote-connect.png")
 full_key = {"name": "Jan – MacBook Pro", "key": "scm_EXAMPLE-not-a-real-key-0000", "created": 0, "may_propose": True,
