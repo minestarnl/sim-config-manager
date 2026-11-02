@@ -19,7 +19,7 @@ recorded, you can see exactly what changed, and you can put everything back with
 ## Download
 
 Get **SimConfigManager-Setup-x.y.z.exe** from the [latest release](../../releases/latest) and run it on each
-sim. It installs both programs (the app and the Claude/ChatGPT connector) in *Program Files*, adds a Start-menu
+sim (and on Windows laptops that should work on the sims remotely; Macs use `SimConfigManager-mac.zip`). It installs both programs (the app and the Claude/ChatGPT connector) in *Program Files*, adds a Start-menu
 entry, and can be uninstalled normally (your data in `C:\ProgramData\SimConfigManager` is kept). The loose
 `.exe` files are in the release too, if you prefer copying them by hand.
 
@@ -66,6 +66,7 @@ publishes `v<version>` automatically (existing releases are never overwritten).
 | **System information** tracked like files: GPU & driver, Windows build, sim software versions, displays, hardware, network, own commands | Files → Track system info |
 | **Google Drive direct** (service account on a Shared Drive, or a Google account) — or any shared folder | Cloud / other sims |
 | Installer, in-app updates | Settings |
+| **Remote app**: run the app on another PC or a Mac and work on a sim over the LAN as if sitting at it | Claude → Network access, *connect to a sim* |
 | Watches tracked files (every 5 s by default) and records a snapshot whenever one changes | automatic |
 | Full history per file, with coloured line-by-line diffs | Files, History |
 | Restore one file to any older version | Files → Restore this version |
@@ -119,6 +120,29 @@ configuration version and whether the files match it. Versions are included in c
 
 Restore points vs versions: **restore points** are named presets you switch between (e.g. "Checkride");
 **versions** are the numbered, official history of the configuration.
+
+## Remote app: work on a sim from another PC or a Mac
+
+Run Sim Config Manager on a laptop (Windows or Mac) and work on any sim over the local network — edit files,
+restore, create versions, manage the rulebook, review Claude's proposals, export certification archives (saved
+on the laptop) — exactly as if you were at the sim. Everything happens on the sim itself and is logged with your
+name (*"— by Jan – MacBook (remote)"*).
+
+1. **On the sim:** *Claude* tab → *Network access* → **Add person…** → choose **Full control (remote app)**.
+   Network access is switched on and a firewall rule for the local network is added. **Setup for the remote
+   app…** shows the steps and a *connection file* (`.scmconnect`) — send it privately.
+2. **Windows laptop:** install with the normal installer and start **Sim Config Manager - connect to a sim**
+   (no admin rights needed). **Mac:** download `SimConfigManager-mac.zip` from the release, unzip, move to
+   Applications, and the first time **right-click → Open** (the app isn't notarized by Apple).
+3. **Add from file…** (or enter the sim's address and key) → **Connect**. Add all sims; switch any time. A sim PC
+   can also open another sim: *Settings → Connect to another sim…*.
+
+![Connect to a sim](docs/screenshots/remote-connect.png)
+
+Notes: remote windows have a purple icon; the sim must be on and its app running with network access on. The
+file browser shows the sim's disk; only config-type files can be read/written outside the tracked files.
+Signing in to Google (account mode) has to be done at the sim itself. Access levels per person: *read only* or
+*read + propose* (for Claude/ChatGPT) and *full control* (remote app). Don't expose the port to the internet.
 
 ## Google Drive (direct)
 
@@ -311,7 +335,8 @@ python SimConfigManager.pyw --no-elevate --data .\testdata  # run with a throw-a
 
 `simconfigmanager/core.py` — storage, snapshots, versions, rules, sync, archives ·
 `gui.py` — main window · `editor.py` — built-in editor · `mcp_server.py` — Claude connector ·
-`net.py` — network access (HTTP endpoint, relays, access keys).
+`net.py` — network access (HTTP endpoint, relays, access keys) · `remote.py` — remote app ·
+`storage.py` — folder / Google Drive backends · `updater.py` — updates.
 Regenerate the README screenshots with `QT_QPA_PLATFORM=offscreen python tools/make_screenshots.py`.
 
 ## Upgrading from SimConfigKeeper (≤ 1.3)

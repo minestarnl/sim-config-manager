@@ -1,4 +1,4 @@
-; Inno Setup script — builds SimConfigManager-Setup-<version>.exe (CI passes /DMyAppVersion=x.y.z)
+; Inno Setup script - builds SimConfigManager-Setup-<version>.exe (CI passes /DMyAppVersion=x.y.z)
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0"
 #endif
@@ -35,6 +35,7 @@ Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Sim Config Manager"; Filename: "{app}\SimConfigManager.exe"
+Name: "{group}\Sim Config Manager - connect to a sim"; Filename: "{app}\SimConfigManager.exe"; Parameters: "--remote"
 Name: "{autodesktop}\Sim Config Manager"; Filename: "{app}\SimConfigManager.exe"; Tasks: desktopicon
 
 [Run]

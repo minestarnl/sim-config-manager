@@ -776,7 +776,7 @@ class EditorWindow(QMainWindow):
                             f"(would be {html.escape(str(v['current']))})"
                             + (f" — {html.escape(v['note'])}" if v.get("note") else "")
                             + ". You can still save, but an alert will be logged.")
-        running = core.running_processes(self.repo.get("warn_processes").split(";"))
+        running = self.repo.running_sim_processes()
         if running:
             warn.append("⚠ Running now: " + ", ".join(running) + ". Prepar3D rewrites Prepar3D.cfg when it exits, "
                         "which can undo your edit — best to close the sim first.")

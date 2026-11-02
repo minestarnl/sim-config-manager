@@ -46,6 +46,19 @@ def make_icon(alert: bool = False) -> QIcon:
     return QIcon(pm)
 
 
+def make_icon_remote() -> QIcon:
+    """Purple icon for windows connected to a sim over the network."""
+    pm = make_icon().pixmap(64, 64)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setBrush(QBrush(QColor("#6a1b9a")))
+    p.setPen(QPen(QColor("white"), 3))
+    p.drawEllipse(36, 36, 26, 26)
+    p.drawLine(42, 49, 56, 49)
+    p.end()
+    return QIcon(pm)
+
+
 def item(text, data=None, color: Optional[str] = None, bold=False) -> QTableWidgetItem:
     it = QTableWidgetItem(str(text))
     it.setFlags(it.flags() & ~Qt.ItemIsEditable)
@@ -94,6 +107,113 @@ def open_in_explorer(path: str):
 
 
 # --------------------------------------------------------------------------- dialogs
+
+class RemoteFileDialog(QDialog):
+    """Browse the sim PC's disk from the remote app (folders + file names only)."""
+
+    def __init__(self, repo, title: str, start: str = "", pick_folder: bool = False, multi: bool = False,
+                 parent=None):
+        super().__init__(parent)
+        self.repo, self.pick_folder, self.multi = repo, pick_folder, multi
+        self.setWindowTitle(title + " — on the sim PC")
+        self.resize(720, 520)
+        lay = QVBoxLayout(self)
+        row = QHBoxLayout()
+        self.path = QLineEdit()
+        self.path.returnPressed.connect(lambda: self.go(self.path.text()))
+        row.addWidget(self.path, 1)
+        b = QPushButton("Up")
+        b.clicked.connect(self.up)
+        row.addWidget(b)
+        self.shortcuts = QComboBox()
+        self.shortcuts.addItem("Go to…")
+        self.shortcuts.activated.connect(self.jump)
+        row.addWidget(self.shortcuts)
+        lay.addLayout(row)
+        self.list = QListWidget()
+        self.list.setSelectionMode(QAbstractItemView.ExtendedSelection if multi else QAbstractItemView.SingleSelection)
+        self.list.itemDoubleClicked.connect(self.open_item)
+        lay.addWidget(self.list, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Use this folder" if pick_folder else "Choose")
+        bb.accepted.connect(self.accept_sel)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.cur = None
+        self.selected: list[str] = []
+        self.go(start)
+
+    def go(self, path: str):
+        try:
+            d = self.repo.list_dir(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, APP_NAME, str(e))
+            return
+        self.cur = d
+        self.path.setText(d["path"])
+        self.list.clear()
+        sep = d.get("sep", "\\")
+        for name in d["dirs"]:
+            it = QListWidgetItem("📁 " + name)
+            it.setData(Qt.UserRole, ("dir", name if not d["path"] else d["path"].rstrip("\\/") + sep + name))
+            self.list.addItem(it)
+        if not self.pick_folder:
+            for name, size in d["files"]:
+                it = QListWidgetItem(f"📄 {name}   ({size:,} bytes)")
+                it.setData(Qt.UserRole, ("file", d["path"].rstrip("\\/") + sep + name))
+                self.list.addItem(it)
+        self.shortcuts.clear()
+        self.shortcuts.addItem("Go to…")
+        self.shortcuts.addItem("Drives")
+        for k, v in sorted(d.get("shortcuts", {}).items()):
+            self.shortcuts.addItem(f"%{k}%  {v}", v)
+
+    def jump(self, idx: int):
+        if idx == 1:
+            self.go("")
+        elif idx > 1:
+            self.go(self.shortcuts.itemData(idx))
+
+    def up(self):
+        if self.cur and self.cur.get("parent") is not None:
+            self.go(self.cur["parent"])
+
+    def open_item(self, it):
+        kind, path = it.data(Qt.UserRole)
+        if kind == "dir":
+            self.go(path)
+        else:
+            self.selected = [path]
+            self.accept()
+
+    def accept_sel(self):
+        if self.pick_folder:
+            if not self.cur or not self.cur["path"]:
+                return
+            self.selected = [self.cur["path"]]
+        else:
+            self.selected = [it.data(Qt.UserRole)[1] for it in self.list.selectedItems()
+                             if it.data(Qt.UserRole)[0] == "file"]
+            if not self.selected:
+                return
+        self.accept()
+
+
+def pick_files(parent, repo, title: str, multi: bool = True) -> list[str]:
+    if core.is_remote(repo):
+        dlg = RemoteFileDialog(repo, title, "", multi=multi, parent=parent)
+        return dlg.selected if dlg.exec() == QDialog.Accepted else []
+    if multi:
+        return QFileDialog.getOpenFileNames(parent, title)[0]
+    p = QFileDialog.getOpenFileName(parent, title)[0]
+    return [p] if p else []
+
+
+def pick_folder(parent, repo, title: str, start: str = "") -> str:
+    if core.is_remote(repo):
+        dlg = RemoteFileDialog(repo, title, start, pick_folder=True, parent=parent)
+        return dlg.selected[0] if dlg.exec() == QDialog.Accepted and dlg.selected else ""
+    return QFileDialog.getExistingDirectory(parent, title, start)
 
 class DiffDialog(QDialog):
     def __init__(self, title: str, diff_text: str, parent=None, summary: Optional[list] = None, ignore_cb=None):
@@ -272,7 +392,9 @@ class ExportArchiveDialog(QDialog):
         form.addRow(QLabel(f"Creates one zip with {what}, a REPORT.txt with paths, dates and SHA-256 checksums "
                            "(for certification), and a .sha256 file to prove the zip was not changed later."))
         stamp = core.time.strftime("%Y-%m-%d_%H%M")
-        default = os.path.join(repo.get("last_archive_dir") or str(Path.home() / "Documents"),
+        start_dir = (parent.pref("last_archive_dir") if parent is not None and hasattr(parent, "pref")
+                     else repo.get("last_archive_dir"))
+        default = os.path.join(start_dir or str(Path.home() / "Documents"),
                                f"{core.safe_name(repo.machine)}_{core.safe_name(name) + '_' if name else ''}"
                                f"configs_{stamp}.zip")
         row = QHBoxLayout()
@@ -338,6 +460,8 @@ class ImportArchiveDialog(QDialog):
         setup_table(self.table, ["Import", "Name", "Group", "Original path", "Target on this PC"], 4)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         files = [e for e in arc.files if e.get("zip")]
+        remote = core.is_remote(repo)
+        remote_targets = repo.expand_portable([e.get("portable_path") or e["path"] for e in files]) if remote else []
         self.table.setRowCount(len(files))
         for r, e in enumerate(files):
             chk = QTableWidgetItem()
@@ -348,8 +472,8 @@ class ImportArchiveDialog(QDialog):
             self.table.setItem(r, 1, item(e["label"]))
             self.table.setItem(r, 2, item(e["group"]))
             self.table.setItem(r, 3, item(e["path"]))
-            tgt = arc.suggested_target(e)
-            exists = os.path.exists(tgt)
+            tgt = remote_targets[r] if remote else arc.suggested_target(e)
+            exists = True if remote else os.path.exists(tgt)
             self.table.setItem(r, 4, item(tgt, color=None if exists else "#1565c0"))
         self.table.cellDoubleClicked.connect(self.edit_target)
         lay.addWidget(self.table)
@@ -377,6 +501,11 @@ class ImportArchiveDialog(QDialog):
         if col != 4:
             return
         cur = self.table.item(row, 4).text()
+        if core.is_remote(self.repo):
+            p, ok = QInputDialog.getText(self, "Target path on the sim", "Path:", text=cur)
+            if ok and p.strip():
+                self.table.setItem(row, 4, item(p.strip()))
+            return
         p, _ = QFileDialog.getSaveFileName(self, "Target path", cur)
         if p:
             self.table.setItem(row, 4, item(os.path.normpath(p)))
@@ -418,7 +547,7 @@ class CreateVersionDialog(QDialog):
             for m in mism:
                 lst.addItem(f"{core.STATUS_TEXT[m.status]}:  {m.file.display}   [{m.file.group}]")
             lay.addWidget(lst)
-        running = core.running_processes(repo.get("warn_processes").split(";"))
+        running = repo.running_sim_processes()
         if running:
             w = QLabel("⚠ Running now: " + ", ".join(running) + ". P3D rewrites Prepar3D.cfg when it exits — "
                        "it is safer to create the version with the sim closed.")
@@ -549,7 +678,7 @@ class NetSetupDialog(QDialog):
         super().__init__(parent)
         self.sim_name, self.key, self.kind = sim_name, key, kind
         self.setWindowTitle(f"Setup for {key['name']} (" + {"mac": "Claude on a Mac", "windows": "Claude on a Windows "
-                            "laptop", "chatgpt": "ChatGPT via a Mac"}[kind] + ")")
+                            "laptop", "chatgpt": "ChatGPT via a Mac", "app": "remote app"}[kind] + ")")
         self.resize(820, 600)
         lay = QVBoxLayout(self)
         if kind == "mac":
@@ -561,6 +690,18 @@ class NetSetupDialog(QDialog):
                      "<li>Quit Claude Desktop (⌘Q) and open it again. In a chat, the tools menu now shows "
                      f"<b>{html.escape(net.server_key_name(sim_name))}</b>.</li></ol>"
                      "Nothing needs to be installed on the Mac — it uses the built-in <i>bash</i> and <i>curl</i>.")
+        elif kind == "app":
+            steps = ("Lets this person run <b>Sim Config Manager on their own PC or Mac</b> and work on this sim over "
+                     "the network — edit files, restore, create versions, review Claude's proposals — as if sitting "
+                     "here. Everything is logged with their name." +
+                     ("" if key.get("full_control") else "<br><b style='color:#c62828'>This person's key is not "
+                      "'Full control'. Remove and add them again with Full control.</b>") +
+                     "<ol><li><b>Windows:</b> install with the normal installer and start <i>Sim Config Manager – "
+                     "connect to a sim</i>. <b>Mac:</b> download <i>SimConfigManager-mac.zip</i> from the release, "
+                     "unzip, move to Applications, then right-click → Open the first time.</li>"
+                     "<li>Save the connection file below and send it privately. In the app: <b>Add from file…</b> "
+                     "(or paste the address and key by hand).</li>"
+                     "<li>Make sure network access is switched on here.</li></ol>")
         elif kind == "chatgpt":
             steps = ("ChatGPT connects from OpenAI's cloud, so it goes through OpenAI's <b>Secure MCP Tunnel</b> "
                      "running on this person's Mac: the Mac only connects <i>outward</i> to OpenAI and passes requests "
@@ -629,6 +770,10 @@ class NetSetupDialog(QDialog):
         return net.windows_config(self.sim_name, url, self.key["key"])
 
     def content(self) -> str:
+        if self.kind == "app":
+            from .remote import connection_file
+            return connection_file(self.sim_name, self.url.currentText().strip().rsplit("/mcp", 1)[0],
+                                   self.key["key"])
         if self.kind == "chatgpt":
             return net.chatgpt_setup_script(self.sim_name, self.key["name"], self.url.currentText().strip(),
                                             self.key["key"])
@@ -638,6 +783,12 @@ class NetSetupDialog(QDialog):
         self.text.setPlainText(self.content())
 
     def save_file(self):
+        if self.kind == "app":
+            p, _ = QFileDialog.getSaveFileName(self, "Save", f"{net.server_key_name(self.sim_name)}.scmconnect",
+                                               "Connection (*.scmconnect)")
+            if p:
+                Path(p).write_text(self.content(), encoding="utf-8")
+            return
         if self.kind == "chatgpt":
             name = f"setup-chatgpt-{net.server_key_name(self.sim_name)}.command"
             p, _ = QFileDialog.getSaveFileName(self, "Save", name, "Mac script (*.command)")
@@ -657,7 +808,7 @@ class ProposalDialog(QDialog):
         self.resize(980, 640)
         lay = QVBoxLayout(self)
         f = repo.file(prop["file_id"])
-        cur = core.read_file_bytes(f.path) if f else None
+        cur = repo.read_current(f) if f else None
         new = core.proposal_data(prop)
         head = QLabel(f"<b>{html.escape(prop['label'])}</b> — {html.escape(prop['path'])}<br>"
                       f"Proposed {fmt_ts(prop['created'])} by <b>{html.escape(prop.get('author', 'Claude'))}</b>"
@@ -675,7 +826,7 @@ class ProposalDialog(QDialog):
         elif (core.sha256_bytes(cur) if cur is not None else None) != prop.get("base_hash"):
             warns.append("⚠ The file changed after Claude read it. The diff below compares the file as it is NOW "
                          "with Claude's version — applying would also undo those newer changes.")
-        running = core.running_processes(repo.get("warn_processes").split(";"))
+        running = repo.running_sim_processes()
         if running:
             warns.append("⚠ Running now: " + ", ".join(running) + ". Prepar3D rewrites Prepar3D.cfg when it exits; "
                          "apply with the sim closed.")
@@ -744,6 +895,8 @@ class MainWindow(QMainWindow):
     def __init__(self, repo: Repo, start_hidden: bool = False):
         super().__init__()
         self.repo = repo
+        self.remote = core.is_remote(repo)
+        self.host = repo.host_info() if self.remote else {"platform": sys.platform}
         self.paused = False
         self.sync_dirty = False
         self.setWindowTitle(f"{APP_NAME} — {repo.machine}")
@@ -784,7 +937,11 @@ class MainWindow(QMainWindow):
         self.sync_timer.timeout.connect(self.auto_push)
         self.sync_timer.start(60_000)
 
-        self.repo.background_probes = True
+        if self.remote:
+            self.setWindowTitle(f"{APP_NAME} — {repo.machine} (remote, {repo.base})")
+            self.setWindowIcon(make_icon_remote())
+        else:
+            self.repo.background_probes = True
         self.probe_timer = QTimer(self)
         self.probe_timer.timeout.connect(self.refresh_probes_bg)
         self.probe_timer.start(60_000)
@@ -793,7 +950,8 @@ class MainWindow(QMainWindow):
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.daily_update_check)
         self.update_timer.start(3_600_000)
-        self.repo.ensure_baseline()
+        if not self.remote:
+            self.repo.ensure_baseline()
         self.refresh_all()
         if not start_hidden:
             self.show()
@@ -853,7 +1011,7 @@ class MainWindow(QMainWindow):
         for e in list(getattr(self, "editors", [])):
             if e.isVisible() and not e.close():
                 return
-        if self.sync_dirty:
+        if self.sync_dirty and not self.remote:
             try:  # last upload before quitting (synchronous)
                 s = self.sync()
                 if s is not None:
@@ -878,6 +1036,17 @@ class MainWindow(QMainWindow):
         self.timer.start(secs * 1000)
 
     def tick(self):
+        if self.remote:
+            # the sim itself watches its files; here we only keep the views fresh
+            self._remote_ticks = getattr(self, "_remote_ticks", 0) + 1
+            try:
+                self.check_proposals()
+                if self.isVisible() and self._remote_ticks % 3 == 0 and not any(
+                        e.isVisible() and e.isActiveWindow() for e in getattr(self, "editors", [])):
+                    self.refresh_all()
+            except Exception as e:  # noqa: BLE001
+                self.statusBar().showMessage(f"Connection problem: {e}")
+            return
         self.check_proposals()
         if getattr(self, "_net_activity", None):
             self.drain_net_activity()
@@ -935,7 +1104,7 @@ class MainWindow(QMainWindow):
         state = "PAUSED · " if self.paused else ""
         self.tray.setToolTip(f"{APP_NAME} — {state}{txt}")
         self.tray_version_action.setText(f"Version status: {txt}")
-        self.setWindowTitle(f"{APP_NAME} — {self.repo.machine} — {txt}")
+        self.setWindowTitle(f"{APP_NAME} — {self.repo.machine}{' (remote)' if self.remote else ''} — {txt}")
         prev = getattr(self, "_last_mismatch_count", None)
         self._last_mismatch_count = len(mm)
         if ver and prev == 0 and mm and self.repo.get("notify_version_drift") != "0":
@@ -1304,9 +1473,7 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(self, APP_NAME, f"Replace '{rp.name}' with the files as they are right now?") \
                 == QMessageBox.Yes:
             snap = self.repo.commit(f"Restore point update: {rp.name}") or self.repo.latest_snapshot()
-            self.repo.db.execute("UPDATE restore_points SET snapshot_id=?, created_at=? WHERE id=?",
-                                 (snap.id, core.now_ts(), rp.id))
-            self.repo.db.commit()
+            self.repo.update_restore_point_snapshot(rp.id, snap.id)
             self.sync_dirty = True
             self.refresh_all()
 
@@ -1329,7 +1496,7 @@ class MainWindow(QMainWindow):
         if not todo:
             QMessageBox.information(self, APP_NAME, f"Everything already matches '{label}'. Nothing to do.")
             return
-        running = core.running_processes(self.repo.get("warn_processes").split(";"))
+        running = self.repo.running_sim_processes()
         txt = "\n".join(f"• {f.display}  [{f.group}]" for f, _ in todo[:25])
         if len(todo) > 25:
             txt += f"\n… and {len(todo) - 25} more"
@@ -1476,7 +1643,7 @@ class MainWindow(QMainWindow):
         m.exec(self.files_table.viewport().mapToGlobal(pos))
 
     def add_files(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Choose config files to track")
+        paths = pick_files(self, self.repo, "Choose config files to track")
         if not paths:
             return
         groups = [""] + self.repo.groups()
@@ -1490,7 +1657,7 @@ class MainWindow(QMainWindow):
         self.refresh_files()
 
     def add_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "Choose folder")
+        d = pick_folder(self, self.repo, "Choose folder")
         if not d:
             return
         pats, ok = QInputDialog.getText(self, "File types", "Which files? (separate with ;)",
@@ -1515,7 +1682,7 @@ class MainWindow(QMainWindow):
     def discover(self):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            cands = core.discover_sim_configs()
+            cands = self.repo.discover()
         finally:
             QApplication.restoreOverrideCursor()
         if not cands:
@@ -1615,12 +1782,12 @@ class MainWindow(QMainWindow):
             cb = QCheckBox(label)
             path = core.PROBE_PREFIX + key
             cb.setChecked(path in tracked or key in ("gpu", "windows", "sim_software", "displays", "hardware"))
-            cb.setEnabled(sys.platform == "win32" and path not in tracked)
+            cb.setEnabled(self.host.get("platform") == "win32" and path not in tracked)
             if path in tracked:
                 cb.setText(label + "  (already tracked)")
             boxes[key] = cb
             lay.addWidget(cb)
-        if sys.platform != "win32":
+        if self.host.get("platform") != "win32":
             lay.addWidget(QLabel("<i>The built-in items are only available on Windows.</i>"))
         row = QHBoxLayout()
         row.addWidget(QLabel("Group:"))
@@ -1647,15 +1814,21 @@ class MainWindow(QMainWindow):
                     core.add_builtin_probe(self.repo, key, grp.text().strip())
             if cname.text().strip() and ccmd.text().strip():
                 core.add_custom_probe(self.repo, cname.text().strip(), ccmd.text().strip(), grp.text().strip())
-            self.repo.background_probes = False   # first reading now
+            if self.remote:
+                self.repo.refresh_probes()      # first reading, on the sim
+            else:
+                self.repo.background_probes = False   # first reading now
             self.repo.ensure_baseline()
         finally:
-            self.repo.background_probes = True
+            if not self.remote:
+                self.repo.background_probes = True
             QApplication.restoreOverrideCursor()
         self.sync_dirty = True
         self.refresh_files()
 
     def refresh_probes_bg(self):
+        if self.remote:
+            return
         due = self.repo.probe_due()
         if not due or getattr(self, "_probing", False):
             return
@@ -1777,6 +1950,9 @@ class MainWindow(QMainWindow):
 
     def open_location(self):
         f = self.current_file()
+        if f and self.remote:
+            QMessageBox.information(self, APP_NAME, f"This file is on the sim PC:\n{f.path}")
+            return
         if f and not core.is_probe(f):
             open_in_explorer(f.path)
 
@@ -1922,7 +2098,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, f"Export failed: {e}")
             return
         QApplication.restoreOverrideCursor()
-        self.repo.set("last_archive_dir", os.path.dirname(path))
+        self.set_pref("last_archive_dir", os.path.dirname(path))
         self.sync_dirty = True
         if upload:
             self.statusBar().showMessage("Uploading archive…")
@@ -1976,7 +2152,7 @@ class MainWindow(QMainWindow):
                     QApplication.restoreOverrideCursor()
         if path is None:
             path, _ = QFileDialog.getOpenFileName(self, "Open SimConfigManager archive",
-                                                  self.repo.get("last_archive_dir"), "Archive (*.zip)")
+                                                  self.pref("last_archive_dir"), "Archive (*.zip)")
         if not path:
             return
         try:
@@ -1990,7 +2166,7 @@ class MainWindow(QMainWindow):
                 return
             targets, write, track, hist = dlg.choices()
             if write:
-                running = core.running_processes(self.repo.get("warn_processes").split(";"))
+                running = self.repo.running_sim_processes()
                 if running and QMessageBox.question(
                         self, APP_NAME, "These sim programs are running: " + ", ".join(running) +
                         "\nThey may overwrite the imported files when they exit. Continue anyway?") \
@@ -2021,7 +2197,8 @@ class MainWindow(QMainWindow):
                                                 "Markdown – paste into Notion (*.md);;CSV – import into "
                                                 "Notion database or Google Sheets (*.csv)")
         if path:
-            self.repo.export_changelog(path, "csv" if path.lower().endswith(".csv") else "md")
+            fmt = "csv" if path.lower().endswith(".csv") else "md"
+            Path(path).write_text(self.repo.changelog(fmt), encoding="utf-8", newline="" if fmt == "csv" else None)
             self.statusBar().showMessage(f"Changelog written to {path}")
 
     # ================================================================= alerts tab
@@ -2291,22 +2468,24 @@ class MainWindow(QMainWindow):
         self.folder_box.setVisible(mode == "folder")
         self.drive_box.setVisible(mode == "gdrive")
         auth = self.drive_auth.currentData()
-        files = core.drive_files(self.repo)
+        try:
+            st = self.repo.drive_file_status()
+        except Exception:  # noqa: BLE001
+            st = {"service_account": "", "client_secrets": False, "token": False}
         self.drive_form.setRowVisible(self.sa_row, auth == "service_account")
         self.drive_form.setRowVisible(self.user_row, auth == "user")
         self.drive_folder.setEnabled(auth == "service_account")
-        from . import storage
-        if files["service_account"].exists():
-            email = storage.service_account_email(str(files["service_account"]))
+        if st["service_account"]:
+            email = st["service_account"]
             self.sa_label.setText(f"<b>{html.escape(email)}</b> — add this address as <i>Content manager</i> of "
                                   "the Shared Drive.")
         else:
             self.sa_label.setText("No key file yet. Create a service account in Google Cloud and download a JSON "
                                   "key (see README).")
-        if files["token"].exists():
+        if st["token"]:
             self.user_label.setText("<span style='color:#2e7d32'>Signed in.</span> The app keeps its files in a "
                                     "'SimConfigManager' folder in that account's Drive.")
-        elif files["client_secrets"].exists():
+        elif st["client_secrets"]:
             self.user_label.setText("OAuth client set. Click Sign in.")
         else:
             self.user_label.setText("Needs an OAuth client file (Desktop app) from Google Cloud, then sign in.")
@@ -2321,8 +2500,7 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             QMessageBox.warning(self, APP_NAME, "That is not a service account key file.")
             return
-        dst = core.drive_files(self.repo)["service_account"]
-        dst.write_text(json.dumps(data), encoding="utf-8")
+        self.repo.save_drive_file("service_account", json.dumps(data))
         self.update_sync_widgets()
         QMessageBox.information(self, APP_NAME, f"Key saved. In Google Drive, open the Shared Drive → Manage members "
                                 f"→ add\n\n{data['client_email']}\n\nas Content manager. Then paste the link of "
@@ -2338,11 +2516,16 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             QMessageBox.warning(self, APP_NAME, "That is not an OAuth client file of type 'Desktop app'.")
             return
-        core.drive_files(self.repo)["client_secrets"].write_text(json.dumps(data), encoding="utf-8")
+        self.repo.save_drive_file("client_secrets", json.dumps(data))
         self.update_sync_widgets()
 
     def drive_sign_in(self):
         from . import storage
+        if self.remote:
+            QMessageBox.information(self, APP_NAME, "Signing in to Google opens a browser on the sim PC itself, so "
+                                    "do this step at the sim (or use the service-account option, which needs no "
+                                    "sign-in).")
+            return
         files = core.drive_files(self.repo)
         if not files["client_secrets"].exists():
             QMessageBox.information(self, APP_NAME, "First choose the OAuth client file.")
@@ -2362,9 +2545,9 @@ class MainWindow(QMainWindow):
         self.save_sync()
 
     def browse_sync(self):
-        d = QFileDialog.getExistingDirectory(self, "Sync folder", self.sync_edit.text())
+        d = pick_folder(self, self.repo, "Sync folder", self.sync_edit.text())
         if d:
-            self.sync_edit.setText(os.path.normpath(d))
+            self.sync_edit.setText(d if self.remote else os.path.normpath(d))
 
     def save_sync(self):
         mode = self.sync_mode.currentData()
@@ -2405,8 +2588,11 @@ class MainWindow(QMainWindow):
             self._bg_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="scm-bg")
             self._bg_local = threading.local()
         data_dir = self.repo.data_dir
+        remote_repo = self.repo if self.remote else None
 
         def job():
+            if remote_repo is not None:
+                return fn(remote_repo)
             r = getattr(self._bg_local, "repo", None)
             if r is None:
                 r = self._bg_local.repo = Repo(data_dir, read_only=True)
@@ -2425,6 +2611,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(150, poll)
 
     def auto_push(self):
+        if self.remote:
+            return  # the sim uploads by itself
         if not (self.repo.get("sync_mode") not in ("", "off") and (self.repo.get("sync_folder") or
                                                                    self.repo.get("sync_mode") == "gdrive")):
             return
@@ -2520,6 +2708,10 @@ class MainWindow(QMainWindow):
         if not ok:
             return None
         if choice == "Other location…":
+            if self.remote:
+                folder = pick_folder(self, self.repo, "Folder on the sim to save to")
+                return (folder.rstrip("\\/") + "\\" + rf["path"].replace("/", "\\").split("\\")[-1]) \
+                    if folder else None
             p, _ = QFileDialog.getSaveFileName(self, "Save to", os.path.basename(rf["path"]))
             return p or None
         return files[names.index(choice)].path
@@ -2537,7 +2729,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, str(e))
             return
         lf = self.repo.find_file_by_path(target)
-        mine = self.repo.read_current(lf) if lf else core.read_file_bytes(target)
+        mine = self.repo.read_current(lf) if lf else self.repo.read_path(target)
         DiffDialog(f"{self.machine_combo.currentData()} → this PC",
                    unified_diff(remote, mine, f"{self.machine_combo.currentData()}", "this PC"), self,
                    summary=core.setting_changes(remote, mine, target)).exec()
@@ -2555,12 +2747,12 @@ class MainWindow(QMainWindow):
             return
         try:
             data = s.fetch(rf["hash"])
-            self.repo.commit("Safety copy before copying from another PC", kind="safety")
-            core.write_file_atomic(target, data)
-            self.repo.log(f"Copied {rf.get('label')} from {self.machine_combo.currentData()} to {target}")
             f = self.repo.find_file_by_path(target)
-            if f:
-                self.repo.commit(f"Copied {f.display} from {self.machine_combo.currentData()}", kind="restore")
+            if f and f.active:
+                self.repo.write_file(f, data, f"copied from {self.machine_combo.currentData()}")
+            else:
+                self.repo.write_path(target, data)
+            self.repo.log(f"Copied {rf.get('label')} from {self.machine_combo.currentData()} to {target}")
             self.sync_dirty = True
             self.statusBar().showMessage("Copied.")
         except Exception as e:  # noqa: BLE001
@@ -2777,7 +2969,7 @@ class MainWindow(QMainWindow):
         intro.setTextFormat(Qt.RichText)
         lay.addWidget(intro)
 
-        box = QGroupBox("Setup")
+        box = self.claude_setup_box = QGroupBox("Setup")
         bl = QHBoxLayout(box)
         self.claude_status = QLabel()
         self.claude_status.setTextFormat(Qt.RichText)
@@ -2817,14 +3009,15 @@ class MainWindow(QMainWindow):
         self.net_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
         nl.addWidget(self.net_status)
         self.key_table = QTableWidget()
-        setup_table(self.key_table, ["Person / computer", "May propose changes", "Key created", "Last connected"], 0)
+        setup_table(self.key_table, ["Person / computer", "Access", "Key created", "Last connected"], 0)
         self.key_table.setMaximumHeight(140)
         nl.addWidget(self.key_table)
         row = QHBoxLayout()
         for text, fn in (("Add person…", self.add_net_key), ("Remove access", self.remove_net_key),
                          ("Setup for a Mac…", lambda: self.show_net_setup("mac")),
                          ("Setup for a Windows laptop…", lambda: self.show_net_setup("windows")),
-                         ("Setup for ChatGPT (via a Mac)…", lambda: self.show_net_setup("chatgpt"))):
+                         ("Setup for ChatGPT (via a Mac)…", lambda: self.show_net_setup("chatgpt")),
+                         ("Setup for the remote app…", lambda: self.show_net_setup("app"))):
             b = QPushButton(text)
             b.clicked.connect(fn)
             row.addWidget(b)
@@ -2833,7 +3026,12 @@ class MainWindow(QMainWindow):
         lay.addWidget(nbox)
         self.net_server = None
         self._net_activity = []
-        if self.net_enable.isChecked():
+        if self.remote:
+            # Claude Desktop hookup and the network server belong to the sim PC itself
+            self.claude_setup_box.hide()
+            self.net_enable.setEnabled(False)
+            self.net_port.setEnabled(False)
+        elif self.net_enable.isChecked():
             QTimer.singleShot(500, lambda: self.start_network(quiet=True))
 
         row = QHBoxLayout()
@@ -2908,6 +3106,8 @@ class MainWindow(QMainWindow):
 
     def net_urls(self) -> list[str]:
         port = self.net_port.value()
+        if self.remote:
+            return [f"{self.repo.base}/mcp"]
         hosts = net.lan_addresses() + [f"{net.hostname().lower()}.local"]
         return [f"http://{h}:{port}/mcp" for h in hosts]
 
@@ -2922,6 +3122,9 @@ class MainWindow(QMainWindow):
                 + " or ".join(f"<b>{html.escape(u)}</b>" for u in urls[:2])
                 + ". Only computers on this local network are let through the firewall, and each needs its own key. "
                   "Tip: give this PC a fixed IP address (DHCP reservation in the router) so the setup keeps working.")
+        elif self.remote:
+            self.net_status.setText("You are connected remotely. Network access is switched on/off at the sim PC; "
+                                    "people and keys can be managed here.")
         elif self.net_enable.isChecked():
             pass
         else:
@@ -2931,7 +3134,10 @@ class MainWindow(QMainWindow):
         for r, k in enumerate(keys):
             ls = seen.get(k["name"])
             self.key_table.setItem(r, 0, item(k["name"], k["key"], bold=True))
-            self.key_table.setItem(r, 1, item("yes" if k.get("may_propose", True) else "read-only"))
+            lvl = net.key_level(k)
+            self.key_table.setItem(r, 1, item({"read": "Claude/ChatGPT read-only", "propose": "Claude/ChatGPT + propose",
+                                               "full": "Full control (remote app)"}[lvl],
+                                              color="#6a1b9a" if lvl == "full" else None, bold=lvl == "full"))
             self.key_table.setItem(r, 2, item(fmt_ts(k["created"])))
             self.key_table.setItem(r, 3, item(f"{fmt_ts(ls[0])} from {ls[1]}" if ls else "–"))
 
@@ -2942,17 +3148,24 @@ class MainWindow(QMainWindow):
         if any(k["name"].lower() == name.strip().lower() for k in net.load_keys(self.repo)):
             QMessageBox.warning(self, APP_NAME, "That name already has a key.")
             return
-        may = QMessageBox.question(self, APP_NAME, f"May Claude on {name}'s computer PROPOSE changes?\n"
-                                   "(You still approve every change on this PC. 'No' = read-only.)") == QMessageBox.Yes
-        k = net.add_key(self.repo, name, may)
-        self.repo.log(f"Network access key created for {k['name']}" + ("" if may else " (read-only)"))
+        levels = list(net.ACCESS_LEVELS.items())
+        choice, ok = QInputDialog.getItem(self, "Access", f"What may {name} do?", [v for _k, v in levels], 1, False)
+        if not ok:
+            return
+        lvl = levels[[v for _k, v in levels].index(choice)][0]
+        if lvl == "full" and QMessageBox.question(
+                self, APP_NAME, f"Full control lets {name} change, restore and version every tracked file on this sim "
+                "from another computer (everything is logged with their name). Continue?") != QMessageBox.Yes:
+            return
+        k = net.add_key(self.repo, name, lvl != "read", full_control=lvl == "full")
+        self.repo.log(f"Network access key created for {k['name']} ({net.ACCESS_LEVELS[lvl]})")
         self.refresh_network()
         for r in range(self.key_table.rowCount()):
             if self.key_table.item(r, 0).text() == k["name"]:
                 self.key_table.selectRow(r)
-        if not self.net_enable.isChecked():
+        if not self.net_enable.isChecked() and not self.remote:
             self.net_enable.setChecked(True)
-        self.show_net_setup("mac")
+        self.show_net_setup("app" if lvl == "full" else "mac")
 
     def remove_net_key(self):
         ids = selected_data(self.key_table)
@@ -2985,6 +3198,9 @@ class MainWindow(QMainWindow):
 
     def refresh_claude(self):
         self.refresh_network()
+        if self.remote:
+            self.refresh_proposals_table()
+            return
         connected = core.claude_desktop_connected()
         if connected:
             self.claude_status.setText("<span style='color:#2e7d32'><b>✔ Connected to Claude Desktop.</b></span> "
@@ -2995,6 +3211,9 @@ class MainWindow(QMainWindow):
             self.claude_status.setText("Not connected. Install Claude Desktop (claude.ai/download) on this PC, then "
                                        "click <b>Connect</b>.")
             self.claude_connect_btn.setText("Connect to Claude Desktop")
+        self.refresh_proposals_table()
+
+    def refresh_proposals_table(self):
         props = list(reversed(core.list_proposals(self.repo)))
         colors = {"pending": "#e65100", "applied": "#2e7d32", "rejected": "#777"}
         self.prop_table.setRowCount(len(props))
@@ -3130,27 +3349,38 @@ class MainWindow(QMainWindow):
         cbv.toggled.connect(lambda v: self.repo.set("notify_version_drift", "1" if v else "0"))
         form.addRow("", cbv)
         self.autostart_cb = QCheckBox("Start with Windows as administrator (runs in the system tray)")
-        self.autostart_cb.setChecked(core.autostart_enabled())
+        self.autostart_cb.setChecked(False if self.remote else core.autostart_enabled())
         self.autostart_cb.setEnabled(sys.platform == "win32")
         self.autostart_cb.toggled.connect(self.toggle_autostart)
-        form.addRow("", self.autostart_cb)
+        if not self.remote:
+            form.addRow("", self.autostart_cb)
         self.proc_edit = QLineEdit(self.repo.get("warn_processes"))
         self.proc_edit.editingFinished.connect(lambda: self.repo.set("warn_processes", self.proc_edit.text()))
         form.addRow("Warn before restoring while these run", self.proc_edit)
-        row = QHBoxLayout()
-        lbl = QLabel(str(self.repo.data_dir))
-        row.addWidget(lbl)
-        b = QPushButton("Open")
-        b.clicked.connect(lambda: open_in_explorer(str(self.repo.data_dir)))
-        row.addWidget(b)
-        row.addStretch()
-        holder = QWidget()
-        holder.setLayout(row)
-        form.addRow("Data folder", holder)
-        adm = core.is_admin()
-        form.addRow("Administrator rights", QLabel("<span style='color:#2e7d32'>yes</span>" if adm else
-                                                   "<span style='color:#c62828'>no — restart the app and accept "
-                                                   "the Windows prompt</span>"))
+        if self.remote:
+            form.addRow("Connected to", QLabel(f"<b>{html.escape(self.repo.machine)}</b> at "
+                                               f"{html.escape(self.repo.base)} — {html.escape(self.host.get('os', ''))}"))
+            form.addRow("Sim's app", QLabel(f"{self.host.get('app_version', '?')}"
+                                            + ("" if self.host.get("admin") else "  (not running as administrator)")))
+        else:
+            row = QHBoxLayout()
+            lbl = QLabel(str(self.repo.data_dir))
+            row.addWidget(lbl)
+            b = QPushButton("Open")
+            b.clicked.connect(lambda: open_in_explorer(str(self.repo.data_dir)))
+            row.addWidget(b)
+            row.addStretch()
+            holder = QWidget()
+            holder.setLayout(row)
+            form.addRow("Data folder", holder)
+        adm = True if self.remote else core.is_admin()
+        if not self.remote:
+            form.addRow("Administrator rights", QLabel("<span style='color:#2e7d32'>yes</span>" if adm else
+                                                       "<span style='color:#c62828'>no — restart the app and accept "
+                                                       "the Windows prompt</span>"))
+        b = QPushButton("Connect to another sim…")
+        b.clicked.connect(self.connect_other_sim)
+        form.addRow("Remote", b)
         if sys.platform == "win32" and not adm:
             self.autostart_cb.setEnabled(False)
             self.autostart_cb.setToolTip("Needs administrator rights to set up")
@@ -3162,15 +3392,15 @@ class MainWindow(QMainWindow):
         b.clicked.connect(lambda: self.check_updates(manual=True))
         ul.addWidget(b)
         self.upd_daily = QCheckBox("Check daily")
-        self.upd_daily.setChecked(self.repo.get("update_check") != "0")
-        self.upd_daily.toggled.connect(lambda v: self.repo.set("update_check", "1" if v else "0"))
+        self.upd_daily.setChecked(self.pref("update_check") != "0")
+        self.upd_daily.toggled.connect(lambda v: self.set_pref("update_check", "1" if v else "0"))
         ul.addWidget(self.upd_daily)
         ul.addStretch()
         form.addRow("Updates", upd)
-        self.upd_token = QLineEdit(self.repo.get("github_token"))
+        self.upd_token = QLineEdit(self.pref("github_token"))
         self.upd_token.setEchoMode(QLineEdit.Password)
         self.upd_token.setPlaceholderText("Only needed while the GitHub repository is private (read-only token)")
-        self.upd_token.editingFinished.connect(lambda: self.repo.set("github_token", self.upd_token.text().strip()))
+        self.upd_token.editingFinished.connect(lambda: self.set_pref("github_token", self.upd_token.text().strip()))
         form.addRow("GitHub access token", self.upd_token)
         self.probe_spin = QSpinBox()
         self.probe_spin.setRange(1, 1440)
@@ -3180,12 +3410,40 @@ class MainWindow(QMainWindow):
         form.addRow("Re-read system info every", self.probe_spin)
         return w
 
+    # preferences of THIS computer (in remote mode they must not go to the sim)
+    def pref(self, key: str) -> str:
+        if not self.remote:
+            return self.repo.get(key)
+        from .remote import client_config_dir
+        try:
+            return str(json.loads((client_config_dir() / "settings.json").read_text(encoding="utf-8")).get(key, ""))
+        except (OSError, ValueError):
+            return ""
+
+    def set_pref(self, key: str, value) -> None:
+        if not self.remote:
+            self.repo.set(key, value)
+            return
+        from .remote import client_config_dir
+        p = client_config_dir() / "settings.json"
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            d = {}
+        d[key] = str(value)
+        p.write_text(json.dumps(d, indent=2), encoding="utf-8")
+
+    def connect_other_sim(self):
+        win = open_connect_dialog(self)
+        if win is not None:
+            win.show_window()
+
     def check_updates(self, manual: bool = False):
         from . import updater
-        token = self.repo.get("github_token")
+        token = self.pref("github_token")
 
         def done(rel):
-            self.repo.set("last_update_check", core.now_ts())
+            self.set_pref("last_update_check", core.now_ts())
             if rel is None:
                 if manual:
                     QMessageBox.information(self, APP_NAME, f"You have the latest version ({APP_VERSION}).")
@@ -3224,7 +3482,7 @@ class MainWindow(QMainWindow):
             return
         last = float(self.repo.get("last_update_check") or 0)
         if core.now_ts() - last > 86400:
-            self.repo.set("last_update_check", core.now_ts())
+            self.set_pref("last_update_check", core.now_ts())
             self.check_updates(manual=False)
 
     def save_machine(self):
@@ -3239,3 +3497,117 @@ class MainWindow(QMainWindow):
             core.set_autostart(on)
         except OSError as e:
             QMessageBox.warning(self, APP_NAME, f"Could not change startup setting: {e}")
+
+
+
+# --------------------------------------------------------------------------- remote: connect to a sim
+
+_REMOTE_WINDOWS: list = []
+
+
+class ConnectDialog(QDialog):
+    """Pick (or add) a sim PC to work on over the network."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from . import remote
+        self.remote = remote
+        self.setWindowTitle("Connect to a sim")
+        self.setWindowIcon(make_icon_remote())
+        self.resize(620, 400)
+        lay = QVBoxLayout(self)
+        lab = QLabel("Work on a sim PC over the network, as if you were sitting at it. The sim needs network access "
+                     "switched on and a <b>Full control</b> key for you (Claude tab → Network access → Add person).")
+        lab.setWordWrap(True)
+        lab.setTextFormat(Qt.RichText)
+        lay.addWidget(lab)
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(lambda _it: self.connect())
+        lay.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        for text, fn in (("Add…", self.add), ("Add from file…", self.add_file), ("Remove", self.remove)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        row.addStretch()
+        b = QPushButton("Connect")
+        b.setDefault(True)
+        b.setStyleSheet("QPushButton { background:#6a1b9a; color:white; font-weight:bold; padding:6px 18px; }")
+        b.clicked.connect(self.connect)
+        row.addWidget(b)
+        lay.addLayout(row)
+        self.window = None
+        self.reload()
+
+    def reload(self):
+        self.list.clear()
+        for c in self.remote.load_connections():
+            it = QListWidgetItem(f"{c['name']}    —  {c['url']}")
+            it.setData(Qt.UserRole, c)
+            self.list.addItem(it)
+        if self.list.count():
+            self.list.setCurrentRow(0)
+
+    def _store(self, conn: dict):
+        conns = [c for c in self.remote.load_connections() if c["name"] != conn["name"]]
+        conns.append(conn)
+        self.remote.save_connections(conns)
+        self.reload()
+
+    def add(self):
+        name, ok = QInputDialog.getText(self, "Add sim", "Name (e.g. Sim 1):")
+        if not ok or not name.strip():
+            return
+        url, ok = QInputDialog.getText(self, "Add sim", "Address of the sim PC (e.g. 192.168.10.11 or sim1.local):")
+        if not ok or not url.strip():
+            return
+        key, ok = QInputDialog.getText(self, "Add sim", "Access key (from the sim's Claude tab → Setup for the "
+                                       "remote app):", QLineEdit.Password)
+        if not ok or not key.strip():
+            return
+        self._store({"name": name.strip(), "url": url.strip(), "key": key.strip()})
+
+    def add_file(self):
+        p, _ = QFileDialog.getOpenFileName(self, "Connection file", str(Path.home() / "Downloads"),
+                                           "Connection (*.scmconnect);;All files (*)")
+        if not p:
+            return
+        try:
+            conn = self.remote.parse_connection_file(Path(p).read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, APP_NAME, str(e))
+            return
+        self._store(conn)
+
+    def remove(self):
+        it = self.list.currentItem()
+        if it and QMessageBox.question(self, APP_NAME, f"Forget {it.data(Qt.UserRole)['name']}?") == QMessageBox.Yes:
+            name = it.data(Qt.UserRole)["name"]
+            self.remote.save_connections([c for c in self.remote.load_connections() if c["name"] != name])
+            self.reload()
+
+    def connect(self):
+        it = self.list.currentItem()
+        if not it:
+            return
+        c = it.data(Qt.UserRole)
+        rr = self.remote.RemoteRepo(c["url"], c["key"], c["name"])
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            rr.ping()
+            win = MainWindow(rr)
+        except Exception as e:  # noqa: BLE001
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, APP_NAME, str(e))
+            return
+        QApplication.restoreOverrideCursor()
+        _REMOTE_WINDOWS.append(win)
+        self.window = win
+        self.accept()
+
+
+def open_connect_dialog(parent=None):
+    dlg = ConnectDialog(parent)
+    if dlg.exec() == QDialog.Accepted:
+        return dlg.window
+    return None

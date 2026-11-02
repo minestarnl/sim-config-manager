@@ -348,4 +348,19 @@ for m in ("Sim 1 (this PC) — 13 files", "Sim 2 — 13 files", "Sim 3 — 13 fi
     w.machine_combo.addItem(m)
 shot(w, "cloud-drive.png")
 drive.stop()
+
+# 14. remote app: connect window with saved sims, and the setup for a person with full control
+os.environ["XDG_CONFIG_HOME"] = str(tmp / "client-config")
+from simconfigmanager import remote  # noqa: E402
+remote.save_connections([{"name": "Sim 1", "url": "192.168.10.11", "key": "x"},
+                         {"name": "Sim 2", "url": "192.168.10.12", "key": "x"},
+                         {"name": "Sim 3", "url": "sim3.local", "key": "x"}])
+cd = gui.ConnectDialog(w)
+cd.resize(620, 360)
+shot(cd, "remote-connect.png")
+full_key = {"name": "Jan – MacBook Pro", "key": "scm_EXAMPLE-not-a-real-key-0000", "created": 0, "may_propose": True,
+            "full_control": True}
+nd = gui.NetSetupDialog("Sim 1", full_key, ["http://192.168.10.11:8765/mcp"], "app", w)
+nd.resize(820, 560)
+shot(nd, "remote-setup.png")
 print("done →", OUT)

@@ -1,4 +1,4 @@
-name: Test & build Windows exe
+name: Test & build
 
 on:
   push:
@@ -8,11 +8,13 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # needed to publish releases for version tags
+  contents: write   # needed to publish releases
 
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -32,18 +34,14 @@ jobs:
       - name: Read app version
         id: ver
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           $v = python -c "from simconfigmanager.core import APP_VERSION; print(APP_VERSION)"
           "version=$v" >> $env:GITHUB_OUTPUT
-          gh release view "v$v" --repo "${{ github.repository }}" *> $null
-          if ($LASTEXITCODE -eq 0) { "exists=true" >> $env:GITHUB_OUTPUT } else { "exists=false" >> $env:GITHUB_OUTPUT }
-          exit 0
 
-
+      # The app asks for administrator rights itself when it starts as the sim's own app,
+      # and doesn't need them in remote mode (--remote), so no requireAdministrator manifest.
       - name: Build SimConfigManager.exe
-        run: python -m PyInstaller --noconfirm --onefile --windowed --uac-admin --name SimConfigManager SimConfigManager.pyw
+        run: python -m PyInstaller --noconfirm --onefile --windowed --name SimConfigManager SimConfigManager.pyw
 
       # Claude connector: console program (stdin/stdout), no admin rights, no Qt
       - name: Build SimConfigManager-MCP.exe
@@ -66,39 +64,84 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "installer build failed" }
           Get-ChildItem dist
 
-      - name: Checksum
-        shell: pwsh
-        run: |
-          $setup = "SimConfigManager-Setup-${{ steps.ver.outputs.version }}.exe"
-          $lines = foreach ($n in $setup, "SimConfigManager.exe", "SimConfigManager-MCP.exe") {
-            "$((Get-FileHash "dist\$n" -Algorithm SHA256).Hash.ToLower()) *$n"
-          }
-          $lines | Out-File -Encoding ascii dist\SHA256SUMS.txt
-          Get-Content dist\SHA256SUMS.txt
-
       - uses: actions/upload-artifact@v4
         with:
-          name: SimConfigManager-windows
+          name: windows
           path: |
             dist/SimConfigManager-Setup-*.exe
             dist/SimConfigManager.exe
             dist/SimConfigManager-MCP.exe
-            dist/SHA256SUMS.txt
 
-      # A release is published automatically the first time a new APP_VERSION (simconfigmanager/core.py)
-      # reaches main, or when a v* tag is pushed. Existing releases are never overwritten.
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller pytest
+
+      # also exercises the Mac relay (bash + curl) and the ChatGPT setup script for real on macOS
+      - name: Run tests
+        run: python -m pytest -q tests
+
+      - name: Build the Mac app (remote mode)
+        run: |
+          python -m PyInstaller --noconfirm --windowed --name SimConfigManager \
+            --osx-bundle-identifier nl.simconfigmanager.app SimConfigManager.pyw
+          ditto -c -k --keepParent dist/SimConfigManager.app dist/SimConfigManager-mac.zip
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: dist/SimConfigManager-mac.zip
+
+  release:
+    needs: [windows, mac]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum SimConfigManager-Setup-*.exe SimConfigManager.exe SimConfigManager-MCP.exe SimConfigManager-mac.zip \
+            | sed 's/  / */' > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Does this version have a release yet?
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${{ needs.windows.outputs.version }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
+
+      # Published the first time a new APP_VERSION (simconfigmanager/core.py) reaches main, or for a v* tag.
+      # Existing releases are never overwritten.
       - name: Publish release
         if: >-
-          (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.ver.outputs.exists == 'false')
+          (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rel.outputs.exists == 'false')
           || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.ver.outputs.version) }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', needs.windows.outputs.version) }}
           target_commitish: ${{ github.sha }}
-          name: SimConfigManager ${{ steps.ver.outputs.version }}
+          name: SimConfigManager ${{ needs.windows.outputs.version }}
           files: |
             dist/SimConfigManager-Setup-*.exe
             dist/SimConfigManager.exe
             dist/SimConfigManager-MCP.exe
+            dist/SimConfigManager-mac.zip
             dist/SHA256SUMS.txt
           generate_release_notes: true

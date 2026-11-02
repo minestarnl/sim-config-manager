@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 APP_NAME = "SimConfigManager"
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.9.0"
 LEGACY_NAMES = ("SimConfigKeeper",)   # earlier name of this app (≤ 1.3)
 
 

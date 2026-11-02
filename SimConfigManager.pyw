@@ -17,7 +17,11 @@ def main():
     ap.add_argument("--data", default=None, help="data folder (default C:\\ProgramData\\SimConfigManager)")
     ap.add_argument("--no-elevate", action="store_true", help="do not ask for administrator rights")
     ap.add_argument("--uninstall-cleanup", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--remote", action="store_true", help="connect to a sim PC over the network (no admin needed)")
     args, _ = ap.parse_known_args()
+    # Macs (and Linux) only ever work remotely; a Windows PC without its own tracked store can too
+    if sys.platform != "win32":
+        args.remote = True
 
     if args.uninstall_cleanup:   # called by the uninstaller (already elevated)
         try:
@@ -34,8 +38,11 @@ def main():
             pass
         return 0
 
-    # Files under Program Files / ProgramData can only be restored with admin rights, so ask for them.
-    # (The built .exe already carries an 'requireAdministrator' manifest; this covers running from source.)
+    if args.remote:
+        return run_remote()
+
+    # Files under Program Files / ProgramData can only be restored with admin rights, so the sim's own app asks
+    # for them (UAC prompt). At logon it starts through the scheduled task, which already has them.
     if sys.platform == "win32" and not core.is_admin() and not args.no_elevate:
         if core.relaunch_as_admin(sys.argv[1:]):
             return 0
@@ -86,6 +93,20 @@ def main():
     if sys.platform == "win32" and not core.is_admin():
         win.statusBar().showMessage("Not running as administrator — restoring files in Program Files / "
                                     "ProgramData may fail.")
+    return app.exec()
+
+
+def run_remote() -> int:
+    """Remote app: pick a sim and work on it over the network."""
+    from simconfigmanager.gui import open_connect_dialog
+    app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setWindowIcon(make_icon())
+    app.setQuitOnLastWindowClosed(False)
+    win = open_connect_dialog()
+    if win is None:
+        return 0
+    win.show_window()
     return app.exec()
 
 
