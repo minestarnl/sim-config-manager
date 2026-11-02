@@ -10,6 +10,24 @@ recorded, you can see exactly what changed, and you can put everything back with
 
 ![Versions overview — which files differ from the current version](docs/screenshots/versions.png)
 
+## Features
+
+- ⭐ **Git-style history** for config files anywhere on disk — every change recorded automatically, line-by-line and per-setting diffs
+- ⭐ **One-click restore** — named restore points ("Customer default", "Checkride"), restore everything or one group; always undoable
+- ⭐ **Numbered versions** (v1, v2 …) of the whole configuration + overview of which files differ
+- ⭐ **Certification archives** — one zip with all files, report and SHA-256 checksums; import on any PC
+- ⭐ **Claude & ChatGPT** can read configs, history and other sims to troubleshoot; proposed changes need your approval
+- ⭐ **Remote app** — work on any sim from another PC or a Mac over the LAN
+- ⭐ **Fleet overview** of all sims, shared through **Google Drive** (direct) or any shared folder
+- **Built-in editor** with syntax highlighting, live syntax check, find/replace; keeps encoding and line endings
+- **Rulebook** — document settings and lock required values
+- **Alerts** with Windows notifications and optional auto-undo; **ignore** values the sim rewrites itself
+- **System info** tracked like files — GPU driver, Windows build, sim software versions, displays, hardware
+- Compare and copy configs between sims · rebuild a reinstalled PC from the backup · changelog export (Notion / Sheets)
+- Finds Prepar3D and ProSim config files automatically
+- Tray app, starts with Windows (as administrator), installer + in-app updates
+
+
 ## Screenshots
 
 | | |
