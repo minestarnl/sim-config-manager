@@ -19,6 +19,7 @@ import difflib
 import fnmatch
 import glob
 import hashlib
+import io
 
 import json
 import os
@@ -582,6 +583,9 @@ class Repo:
 
     # ---------------- events
     def log(self, message: str, level: str = "info", file_id: Optional[int] = None) -> None:
+        actor = getattr(self, "actor", None)
+        if actor:
+            message = f"{message} — by {actor}"
         self.db.execute("INSERT INTO events(ts, level, file_id, message) VALUES(?,?,?,?)",
                         (now_ts(), level, file_id, message))
         self.db.commit()
@@ -879,6 +883,9 @@ class Repo:
             names = ", ".join(f.display for f in changed[:4])
             more = f" +{len(changed) - 4} more" if len(changed) > 4 else ""
             message = f"Changed: {names}{more}" if changed else "No changes"
+        actor = getattr(self, "actor", None)
+        if actor and kind in ("manual", "restore"):
+            message = f"{message} — by {actor}"
         cur = self.db.execute("INSERT INTO snapshots(created_at, message, kind, machine) VALUES(?,?,?,?)",
                               (now_ts(), message, kind, self.machine))
         sid = cur.lastrowid
@@ -938,6 +945,11 @@ class Repo:
     def update_restore_point(self, rp_id: int, name: str, description: str, color: str = "") -> None:
         self.db.execute("UPDATE restore_points SET name=?, description=?, color=? WHERE id=?",
                         (name, description, color, rp_id))
+        self.db.commit()
+
+    def update_restore_point_snapshot(self, rp_id: int, snapshot_id: int) -> None:
+        self.db.execute("UPDATE restore_points SET snapshot_id=?, created_at=? WHERE id=?",
+                        (snapshot_id, now_ts(), rp_id))
         self.db.commit()
 
     def delete_restore_point(self, rp_id: int) -> None:
@@ -1248,6 +1260,9 @@ class Repo:
 
     # ---------------- export
     def export_changelog(self, path: str, fmt: str = "md") -> None:
+        Path(path).write_text(self.changelog(fmt), encoding="utf-8", newline="" if fmt == "csv" else None)
+
+    def changelog(self, fmt: str = "md") -> str:
         snaps = list(reversed(self.snapshots(100000)))
         rows = []
         for s in snaps:
@@ -1265,10 +1280,11 @@ class Repo:
                              "lines_added": a, "lines_removed": d,
                              "status": "deleted" if new is None else ("new" if old is None else "modified")})
         if fmt == "csv":
-            with open(path, "w", newline="", encoding="utf-8") as fh:
-                w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()) if rows else ["time"])
-                w.writeheader()
-                w.writerows(rows)
+            buf = io.StringIO()
+            w = csv.DictWriter(buf, fieldnames=list(rows[0].keys()) if rows else ["time"])
+            w.writeheader()
+            w.writerows(rows)
+            return buf.getvalue()
         else:
             out = [f"# {APP_NAME} changelog — {self.machine}", "",
                    "| Time | Machine | File | Group | Change | +/- | Note |", "|---|---|---|---|---|---|---|"]
@@ -1276,7 +1292,7 @@ class Repo:
                 note = r["message"].replace("|", "/")
                 out.append(f"| {r['time']} | {r['machine']} | {r['file']} | {r['group']} | {r['status']} | "
                            f"+{r['lines_added']}/-{r['lines_removed']} | {note} |")
-            Path(path).write_text("\n".join(out), encoding="utf-8")
+            return "\n".join(out)
 
     def export_snapshot_zip(self, snapshot_id: int, zip_path: str) -> None:
         import zipfile
@@ -1446,6 +1462,9 @@ def parse_drive_folder(text: str) -> str:
 
 def make_sync(repo: Repo) -> Optional[Sync]:
     """The configured sync location, or None. Settings: sync_mode = folder | gdrive."""
+    if is_remote(repo):
+        from .remote import RemoteSync
+        return RemoteSync(repo) if repo.call("sync_configured") else None
     mode = repo.get("sync_mode") or ("folder" if repo.get("sync_folder") else "")
     if mode == "folder" and repo.get("sync_folder"):
         return FolderSync(repo, repo.get("sync_folder"))
@@ -1471,6 +1490,8 @@ def make_sync(repo: Repo) -> Optional[Sync]:
 
 def build_status(repo: Repo) -> dict:
     """Small heartbeat for the fleet overview (written every few minutes)."""
+    if is_remote(repo):
+        return repo.call("build_status")
     ver, status = repo.version_status()
     mism = [x for x in status if x.status in ("modified", "missing", "new")] if ver else []
     day = now_ts() - 86400
@@ -1611,6 +1632,12 @@ def export_archive(repo: "Repo", zip_path: str, note: str = "", include_history:
         history/                     (optional) full version history, restore points and alert rules
     plus <zip>.sha256 next to the zip with the hash of the archive itself.
     """
+    if is_remote(repo):   # built on the sim, saved here
+        res = repo.call("export_archive_bytes", note, include_history, snapshot_id, os.path.basename(zip_path))
+        zp = Path(zip_path)
+        zp.write_bytes(res.pop("zip"))
+        Path(str(zp) + ".sha256").write_text(f"{res['sha256']} *{zp.name}\n", encoding="utf-8")
+        return dict(res, path=str(zp))
     import platform
     import zipfile
     if snapshot_id is None:
@@ -1785,6 +1812,9 @@ class Archive:
     def apply(self, repo: "Repo", targets: dict, write_files: bool = True, track: bool = True,
               import_history: bool = False) -> list[tuple[str, str]]:
         """targets: {archive file id (int): target path}. Returns [(label, result)]."""
+        if is_remote(repo):   # the files are written on the sim
+            return repo.call("import_archive_bytes", Path(self.path).read_bytes(), os.path.basename(self.path),
+                             targets, write_files, track, import_history)
         report = []
         if import_history:
             if not self.has_history:
@@ -2076,6 +2106,8 @@ def create_proposal(repo: "Repo", f: TrackedFile, new_data: bytes, reason: str, 
 
 
 def list_proposals(repo: "Repo", status: Optional[str] = None) -> list[dict]:
+    if is_remote(repo):
+        return repo.call("list_proposals", status)
     d = proposals_dir(repo)
     out = []
     if d.is_dir():
@@ -2102,6 +2134,8 @@ def _save_proposal(repo: "Repo", prop: dict) -> None:
 
 
 def reject_proposal(repo: "Repo", prop: dict, note: str = "") -> None:
+    if is_remote(repo):
+        return repo.call("reject_proposal", prop, note)
     prop.update(status="rejected", decided=now_ts(), note=note)
     _save_proposal(repo, prop)
     repo.log(f"Rejected Claude's proposed change to {prop['label']}" + (f": {note}" if note else ""),
@@ -2110,6 +2144,8 @@ def reject_proposal(repo: "Repo", prop: dict, note: str = "") -> None:
 
 def apply_proposal(repo: "Repo", prop: dict, approved_by: str = "") -> None:
     """Write the proposed content (safety snapshot first, recorded in History)."""
+    if is_remote(repo):
+        return repo.call("apply_proposal", prop, approved_by)
     f = repo.file(prop["file_id"])
     if f is None:
         raise ValueError("That file is no longer tracked.")
@@ -2233,6 +2269,10 @@ def allow_users_to_propose(data_dir: Path) -> None:
 # =========================================================================== system information (#3)
 
 PROBE_PREFIX = "system://"
+
+
+def is_remote(repo) -> bool:
+    return bool(getattr(repo, "is_remote", False))
 
 
 def is_probe(f) -> bool:
@@ -2647,3 +2687,184 @@ def repair_paths_after_move(data_dir: Path) -> list[str]:
             fixed.append("Claude Desktop connector")
             break
     return fixed
+
+
+
+# =========================================================================== server-side operations for remote mode
+# Everything the app does that touches the sim PC's own disk/OS outside the store goes through these
+# methods, so the same UI works locally and from another computer (see remote.py).
+
+SAFE_EXTENSIONS = (".cfg", ".xml", ".ini", ".json", ".txt", ".fxml", ".dsd", ".ccp", ".inf", ".config", ".csv",
+                   ".log", ".yaml", ".yml", ".dat")
+
+
+def _path_allowed(repo, path: str) -> bool:
+    if repo.find_file_by_path(path):
+        return True
+    return os.path.splitext(path)[1].lower() in SAFE_EXTENSIONS
+
+
+def _read_path(self, path: str) -> Optional[bytes]:
+    if not _path_allowed(self, path):
+        raise PermissionError("Only config-type files can be read remotely.")
+    try:
+        return read_file_bytes(path)
+    except PermissionError:
+        return None
+
+
+def _write_path(self, path: str, data: bytes) -> None:
+    if not _path_allowed(self, path):
+        raise PermissionError("Only config-type files can be written remotely.")
+    f = self.find_file_by_path(path)
+    if f and f.active:
+        self.write_file(f, data, "written remotely")
+    else:
+        write_file_atomic(path, data)
+        self.log(f"Wrote {path}")
+
+
+def _list_dir(self, path: str = "") -> dict:
+    """Folder browser for the remote app (names and sizes only)."""
+    if not path:
+        if sys.platform == "win32":
+            drives = [f"{c}:\\" for c in "CDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{c}:\\")]
+            return {"path": "", "parent": None, "dirs": drives, "files": [],
+                    "shortcuts": {k: os.environ.get(k, "") for k in ("APPDATA", "PROGRAMDATA", "USERPROFILE",
+                                                                      "LOCALAPPDATA") if os.environ.get(k)}}
+        path = str(Path.home())
+    p = Path(path)
+    if not p.is_dir():
+        raise FileNotFoundError(f"Not a folder: {path}")
+    dirs, files = [], []
+    try:
+        for e in sorted(os.scandir(p), key=lambda e: e.name.lower()):
+            try:
+                if e.is_dir():
+                    dirs.append(e.name)
+                elif e.is_file():
+                    files.append((e.name, e.stat().st_size))
+            except OSError:
+                continue
+    except PermissionError:
+        pass
+    parent = str(p.parent) if p.parent != p else ""
+    return {"path": str(p), "parent": parent, "dirs": dirs, "files": files, "sep": os.sep,
+            "shortcuts": {k: os.environ.get(k, "") for k in ("APPDATA", "PROGRAMDATA", "USERPROFILE", "LOCALAPPDATA")
+                          if os.environ.get(k)}}
+
+
+def _host_info(self) -> dict:
+    import platform
+    return {"hostname": socket.gethostname(), "os": platform.platform(), "platform": sys.platform,
+            "user": os.environ.get("USERNAME") or os.environ.get("USER", ""), "app_version": APP_VERSION,
+            "admin": is_admin(), "machine": self.machine}
+
+
+def _drive_file_status(self) -> dict:
+    from . import storage
+    f = drive_files(self)
+    return {"service_account": storage.service_account_email(str(f["service_account"]))
+            if f["service_account"].exists() else "",
+            "client_secrets": f["client_secrets"].exists(), "token": f["token"].exists()}
+
+
+def _save_drive_file(self, kind: str, text: str) -> None:
+    if kind not in ("service_account", "client_secrets"):
+        raise ValueError("unknown file")
+    drive_files(self)[kind].write_text(text, encoding="utf-8")
+    self.log(f"Google Drive {kind.replace('_', ' ')} file updated")
+
+
+def _export_archive_bytes(self, note: str = "", include_history: bool = True, snapshot_id: Optional[int] = None,
+                          name: str = "archive.zip") -> dict:
+    import tempfile
+    d = Path(tempfile.mkdtemp(prefix="scm-export-"))
+    try:
+        res = export_archive(self, str(d / (name or "archive.zip")), note, include_history, snapshot_id)
+        return {"zip": Path(res["path"]).read_bytes(), "sha256": res["sha256"], "files": res["files"],
+                "missing": res["missing"]}
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _import_archive_bytes(self, data: bytes, name: str, targets: dict, write_files: bool = True, track: bool = True,
+                          import_history: bool = False):
+    import tempfile
+    d = Path(tempfile.mkdtemp(prefix="scm-import-"))
+    try:
+        zp = d / (os.path.basename(name) or "archive.zip")
+        zp.write_bytes(data)
+        arc = Archive(str(zp))
+        try:
+            return arc.apply(self, {int(k): v for k, v in targets.items()}, write_files, track, import_history)
+        finally:
+            arc.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _expand_portable(self, paths: list) -> list:
+    return [from_portable(p) for p in paths]
+
+
+SYNC_REMOTE_METHODS = {"push", "push_status", "statuses", "machines", "manifest", "fetch", "remote_latest",
+                       "import_machine", "list_archives"}
+
+
+def _sync_configured(self) -> bool:
+    try:
+        return make_sync(self) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _sync_call(self, name: str, *args):
+    s = make_sync(self)
+    if s is None:
+        raise ValueError("No sharing location is set up on the sim.")
+    if name == "ok":
+        return s.ok
+    if name == "where":
+        return s.where
+    if name == "check":
+        if hasattr(s.backend, "check"):
+            return s.backend.check()
+        if not s.ok:
+            raise FileNotFoundError(f"Folder not reachable: {s.where}")
+        return s.where
+    if name == "upload_archive_bytes":
+        import tempfile
+        fname, data, side = args
+        d = Path(tempfile.mkdtemp(prefix="scm-up-"))
+        try:
+            zp = d / os.path.basename(fname)
+            zp.write_bytes(data)
+            if side:
+                Path(str(zp) + ".sha256").write_bytes(side)
+            return s.upload_archive(str(zp))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+    if name == "download_archive_bytes":
+        import tempfile
+        d = Path(tempfile.mkdtemp(prefix="scm-down-"))
+        try:
+            p = Path(s.download_archive(args[0], str(d)))
+            side = Path(str(p) + ".sha256")
+            return p.read_bytes(), (side.read_bytes() if side.exists() else None)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+    if name in SYNC_REMOTE_METHODS:
+        return getattr(s, name)(*args)
+    raise ValueError(f"Not allowed: {name}")
+
+
+for _name, _fn in (("read_path", _read_path), ("write_path", _write_path), ("list_dir", _list_dir),
+                   ("host_info", _host_info), ("drive_file_status", _drive_file_status),
+                   ("save_drive_file", _save_drive_file), ("export_archive_bytes", _export_archive_bytes),
+                   ("import_archive_bytes", _import_archive_bytes), ("expand_portable", _expand_portable),
+                   ("sync_configured", _sync_configured), ("sync_call", _sync_call),
+                   ("list_proposals", list_proposals), ("apply_proposal", apply_proposal),
+                   ("reject_proposal", reject_proposal), ("build_status", build_status),
+                   ("discover", lambda self: discover_sim_configs())):
+    setattr(Repo, _name, _fn)

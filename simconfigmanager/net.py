@@ -48,9 +48,23 @@ def save_keys(repo, keys: list[dict]) -> None:
     repo.set("net_keys", json.dumps(keys))
 
 
-def add_key(repo, name: str, may_propose: bool = True) -> dict:
+ACCESS_LEVELS = {
+    "read": "Claude/ChatGPT: read only",
+    "propose": "Claude/ChatGPT: read + propose changes (you approve)",
+    "full": "Full control: remote app (edit, restore, versions …) + Claude/ChatGPT",
+}
+
+
+def key_level(k: dict) -> str:
+    if k.get("full_control"):
+        return "full"
+    return "propose" if k.get("may_propose", True) else "read"
+
+
+def add_key(repo, name: str, may_propose: bool = True, full_control: bool = False) -> dict:
     keys = load_keys(repo)
-    k = {"name": name.strip() or "Unnamed", "key": new_key(), "created": time.time(), "may_propose": may_propose}
+    k = {"name": name.strip() or "Unnamed", "key": new_key(), "created": time.time(),
+         "may_propose": may_propose or full_control, "full_control": full_control}
     keys.append(k)
     save_keys(repo, keys)
     return k
@@ -80,7 +94,7 @@ class NetworkServer:
     """MCP over HTTP inside the app. Thread-safe: each request opens its own read-only store connection."""
 
     def __init__(self, data_dir, port: int = DEFAULT_PORT, host: str = "0.0.0.0",
-                 on_activity: Optional[Callable[[str], None]] = None):
+                 on_activity: Optional[Callable[[str], None]] = None, probe_cache: Optional[dict] = None):
         self.data_dir = str(data_dir)
         self.port = port
         self.host = host
@@ -89,6 +103,8 @@ class NetworkServer:
         self.recent: dict[str, float] = {}
         self.on_activity = on_activity
         self.httpd: Optional[ThreadingHTTPServer] = None
+        self.probe_cache = probe_cache
+        self.rpc = None          # remote-app executor, started on first use
         self.thread: Optional[threading.Thread] = None
 
     # ----- lifecycle
@@ -131,7 +147,36 @@ class NetworkServer:
             def do_DELETE(self):
                 self._send(405)
 
+            def _rpc(self):
+                """Remote app (full control keys only)."""
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b""
+                if self.headers.get("Origin"):
+                    return self._send(403, b'{"error": "Requests from web pages are not allowed."}')
+                auth = self.headers.get("Authorization", "")
+                token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+                key = next((k for k in server.keys if token and hmac.compare_digest(k["key"], token)), None)
+                if key is None:
+                    return self._send(401, b'{"error": "Access key not accepted by this sim."}')
+                if not key.get("full_control"):
+                    return self._send(403, json.dumps({"error": f"The key of {key['name']} is for Claude/ChatGPT "
+                                                                f"only, not for the remote app (full control)."})
+                                      .encode())
+                from .remote import RpcExecutor, handle_rpc
+                if server.rpc is None:
+                    server.rpc = RpcExecutor(server.data_dir, server.probe_cache)
+                ip = self.client_address[0]
+                tag = f"{key['name']} / app"
+                first = tag not in server.recent or time.time() - server.recent[tag] > 600
+                server.recent[tag] = time.time()
+                server.last_seen[key["name"]] = (time.time(), f"{ip} (remote app)")
+                if first and server.on_activity:
+                    server.on_activity(f"Remote app connected: {key['name']} from {ip}")
+                self._send(200, handle_rpc(server.rpc, raw, f"{key['name']} (remote)"))
+
             def do_POST(self):
+                if self.path.startswith("/rpc"):
+                    return self._rpc()
                 if not self.path.startswith("/mcp"):
                     return self._send(404)
                 length = int(self.headers.get("Content-Length") or 0)
@@ -190,6 +235,9 @@ class NetworkServer:
         self.thread.start()
 
     def stop(self):
+        if self.rpc:
+            self.rpc.stop()
+            self.rpc = None
         if self.httpd:
             self.httpd.shutdown()
             self.httpd.server_close()
