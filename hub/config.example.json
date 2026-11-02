@@ -1,0 +1,18 @@
+{
+  "port": 8780,
+  "host": "0.0.0.0",
+  "dataDir": "./data",
+  "title": "Sim Center",
+  "offlineAfterMinutes": 15,
+  "trustProxy": false,
+  "users": [
+    { "name": "admin", "password": "change-me", "role": "admin" },
+    { "name": "tech", "password": "change-me-too", "role": "tech" },
+    { "name": "office", "password": "change-me-three", "role": "viewer" }
+  ],
+  "kioskToken": "",
+  "webhooks": [
+    { "url": "https://hooks.slack.com/services/XXX/YYY/ZZZ", "format": "slack",
+      "events": ["offline", "online", "rulebook", "drift", "alert", "version"] }
+  ]
+}

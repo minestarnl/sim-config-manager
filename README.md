@@ -19,6 +19,8 @@ recorded, you can see exactly what changed, and you can put everything back with
 - ⭐ **Claude & ChatGPT** can read configs, history and other sims to troubleshoot; proposed changes need your approval
 - ⭐ **Remote app** — work on any sim from another PC or a Mac over the LAN
 - ⭐ **Fleet overview** of all sims, shared through **Google Drive** (direct) or any shared folder
+- ⭐ **Hub web dashboard** (optional, self-hosted Node.js) — live status of every sim in a browser or on a wall
+  screen: GO / NO-GO board, events, logbook, maintenance mode, uptime, Slack/Teams/Discord/ntfy alerts
 - **Built-in editor** with syntax highlighting, live syntax check, find/replace; keeps encoding and line endings
 - **Rulebook** — document settings and lock required values
 - **Alerts** with Windows notifications and optional auto-undo; **ignore** values the sim rewrites itself
@@ -143,6 +145,66 @@ configuration version and whether the files match it. Versions are included in c
 
 Restore points vs versions: **restore points** are named presets you switch between (e.g. "Checkride");
 **versions** are the numbered, official history of the configuration.
+
+## Hub: central web dashboard (optional)
+
+![Hub fleet overview](docs/screenshots/hub-fleet.png)
+
+A small web server you host yourself (Node.js, no extra packages). Every sim that you connect reports its status
+to it, and anyone with a login sees all sims in a browser — at the desk, on a phone, or on a TV in the workshop.
+It's an add-on: the app works exactly the same without it, and it only *receives* status (never file contents,
+and it can't change anything on the sims).
+
+| | |
+|---|---|
+| **Sim detail** — problems, differing files, rulebook, uptime, versions, logbook ![](docs/screenshots/hub-sim.png) | **Readiness board** — big GO / NO-GO tiles for a wall screen ![](docs/screenshots/hub-board.png) |
+| **Events** — everything across the fleet, filterable ![](docs/screenshots/hub-events.png) | **Phone** ![](docs/screenshots/hub-phone.png) |
+
+**What it does**
+* Fleet overview: online/offline, configuration version, files that differ, rulebook problems, alerts, changes
+  waiting for approval, GPU driver, app version — updating live.
+* **GO / NO-GO** per sim (online, has a version, everything matches it, rulebook OK, not in maintenance) and a
+  full-screen **readiness board**; a secret wall-display link signs a TV in without a password.
+* **Events** for the whole fleet: sim offline/back online, files start to differ, rulebook broken/fixed, alerts
+  from the sims, new versions, AI proposals waiting, maintenance, logbook entries.
+* **Notifications** to Slack, Microsoft Teams, Discord, ntfy (phone push) or any JSON webhook — per event type.
+* **Maintenance mode** per sim (mutes notifications, shows the reason on the board) and a **logbook** per sim
+  (hardware, software, calibration, incidents).
+* Uptime per sim (7 days + last 24 h), CSV export of the fleet status.
+* Users with roles: *viewer* (look), *tech* (logbook, maintenance), *admin* (add sims, keys).
+
+**Run it**
+
+```bash
+cd hub
+cp config.example.json config.json      # set users/passwords, title, webhooks
+node src/server.js                      # → http://localhost:8780
+# or with Docker:
+docker build -t scm-hub hub && docker run -d -p 8780:8780 -v scm-hub-data:/data \
+  -e SCM_HUB_ADMIN_PASSWORD=change-me scm-hub
+```
+
+Needs Node.js 18.18 or newer; no `npm install`. The release also has `SimConfigManager-Hub-x.y.z.zip`. A
+systemd unit is in `hub/scm-hub.service`. Settings (in `config.json` or environment variables):
+
+| Setting | Env var | Default | |
+|---|---|---|---|
+| `port`, `host` | `PORT`, `HOST` | 8780, 0.0.0.0 | where it listens |
+| `dataDir` | `SCM_HUB_DATA` | `./data` | sims, events, uptime (plain JSON files) |
+| `title` | `SCM_HUB_TITLE` | Sim Center | shown in the page and notifications |
+| `users` | `SCM_HUB_ADMIN_PASSWORD` | – | `[{name, password, role}]`; the env var creates user *admin*. Hash passwords with `node src/server.js hash-password <pw>` |
+| `offlineAfterMinutes` | | 15 | no report for this long → offline |
+| `kioskToken` | `SCM_HUB_KIOSK_TOKEN` | – | wall display: open `https://your-hub/kiosk?token=…` |
+| `webhooks` | | – | `[{url, format: slack\|teams\|discord\|ntfy\|json, events: [...]}]` |
+| `trustProxy` | `SCM_HUB_TRUST_PROXY=1` | false | behind a reverse proxy (client IP, secure cookies) |
+
+**Connect the sims:** in the hub, *Sims & settings* (gear) → **Add sim** → copy the key. In the app on that sim:
+*Cloud & other sims* → **Central dashboard** → tick *Report to a central dashboard*, paste the hub address and key →
+**Save & send now**. The sim then reports every 5 minutes and right after any change.
+
+**Security:** put the hub behind HTTPS (e.g. Caddy, nginx, Cloudflare Tunnel) if it's reachable from outside your
+network; use strong passwords. Each sim has its own key (can be replaced or removed); browser sessions use
+HttpOnly/SameSite cookies, logins are rate-limited.
 
 ## Remote app: work on a sim from another PC or a Mac
 
@@ -359,7 +421,8 @@ python SimConfigManager.pyw --no-elevate --data .\testdata  # run with a throw-a
 `simconfigmanager/core.py` — storage, snapshots, versions, rules, sync, archives ·
 `gui.py` — main window · `editor.py` — built-in editor · `mcp_server.py` — Claude connector ·
 `net.py` — network access (HTTP endpoint, relays, access keys) · `remote.py` — remote app ·
-`storage.py` — folder / Google Drive backends · `updater.py` — updates.
+`storage.py` — folder / Google Drive backends · `updater.py` — updates · `hub/` — the optional web dashboard
+(`cd hub && npm test`). Hub screenshots: `python tools/hub_screenshots.py`.
 Regenerate the README screenshots with `QT_QPA_PLATFORM=offscreen python tools/make_screenshots.py`.
 
 ## Upgrading from SimConfigKeeper (≤ 1.3)

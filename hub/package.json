@@ -1,0 +1,15 @@
+{
+  "name": "simconfigmanager-hub",
+  "version": "1.0.0",
+  "description": "Optional central web dashboard for SimConfigManager: status of every sim in one place.",
+  "type": "module",
+  "main": "src/server.js",
+  "bin": { "scm-hub": "src/server.js" },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": { "node": ">=18.18" },
+  "license": "UNLICENSED",
+  "private": true
+}

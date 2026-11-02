@@ -104,8 +104,28 @@ jobs:
           name: mac
           path: dist/SimConfigManager-mac.zip
 
+  hub:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Hub tests
+        working-directory: hub
+        run: npm test
+      - name: Package the hub
+        run: |
+          v=$(grep -oP 'APP_VERSION = "\K[^"]+' simconfigmanager/core.py)
+          mkdir -p dist && cd hub && zip -r "../dist/SimConfigManager-Hub-$v.zip" package.json config.example.json \
+            Dockerfile scm-hub.service src public
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hub
+          path: dist/SimConfigManager-Hub-*.zip
+
   release:
-    needs: [windows, mac]
+    needs: [windows, mac, hub]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -117,6 +137,7 @@ jobs:
         run: |
           cd dist
           sha256sum SimConfigManager-Setup-*.exe SimConfigManager.exe SimConfigManager-MCP.exe SimConfigManager-mac.zip \
+            SimConfigManager-Hub-*.zip \
             | sed 's/  / */' > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
@@ -144,5 +165,6 @@ jobs:
             dist/SimConfigManager.exe
             dist/SimConfigManager-MCP.exe
             dist/SimConfigManager-mac.zip
+            dist/SimConfigManager-Hub-*.zip
             dist/SHA256SUMS.txt
           generate_release_notes: true

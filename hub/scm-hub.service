@@ -1,0 +1,17 @@
+# systemd unit — copy to /etc/systemd/system/scm-hub.service, adjust paths, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now scm-hub
+[Unit]
+Description=SimConfigManager Hub
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/scm-hub
+ExecStart=/usr/bin/node src/server.js
+Environment=SCM_HUB_CONFIG=/opt/scm-hub/config.json
+Restart=on-failure
+User=scmhub
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

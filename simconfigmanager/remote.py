@@ -90,7 +90,8 @@ ALLOWED = {
     # server-side helpers (core.py, "server-side operations for remote mode")
     "read_path", "write_path", "list_dir", "host_info", "drive_file_status", "save_drive_file",
     "export_archive_bytes", "import_archive_bytes", "expand_portable", "sync_configured", "sync_call",
-    "list_proposals", "apply_proposal", "reject_proposal", "build_status", "discover",
+    "list_proposals", "apply_proposal", "reject_proposal", "build_status", "discover", "build_hub_report",
+    "hub_signature",
 }
 
 

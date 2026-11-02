@@ -936,6 +936,10 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.apply_poll_interval()
+        self.hub_timer = QTimer(self)
+        self.hub_timer.timeout.connect(self.hub_tick)
+        self.hub_timer.start(30_000)
+        QTimer.singleShot(8000, self.hub_tick)
         self.sync_timer = QTimer(self)
         self.sync_timer.timeout.connect(self.auto_push)
         self.sync_timer.start(60_000)
@@ -2562,6 +2566,38 @@ class MainWindow(QMainWindow):
         self.drive_auth.currentIndexChanged.connect(lambda _i: self.update_sync_widgets())
         self.update_sync_widgets()
 
+        hub = QGroupBox("Central dashboard (optional) — report this sim's status to a SimConfigManager Hub web page")
+        hl = QFormLayout(hub)
+        self.hub_enable = QCheckBox("Report to a central dashboard")
+        self.hub_enable.setChecked(self.repo.get("hub_enabled") == "1")
+        hl.addRow("", self.hub_enable)
+        self.hub_url = QLineEdit(self.repo.get("hub_url"))
+        self.hub_url.setPlaceholderText("Address of your hub, e.g. https://hub.example.com or http://192.168.10.5:8780")
+        hl.addRow("Hub address", self.hub_url)
+        self.hub_key = QLineEdit(self.repo.get("hub_key"))
+        self.hub_key.setEchoMode(QLineEdit.Password)
+        self.hub_key.setPlaceholderText("Key for this sim (hub → Sims & settings → Add sim)")
+        hl.addRow("Hub key", self.hub_key)
+        row = QHBoxLayout()
+        b = QPushButton("Save && send now")
+        b.clicked.connect(self.save_hub)
+        row.addWidget(b)
+        self.hub_status = QLabel()
+        self.hub_status.setTextFormat(Qt.RichText)
+        self.hub_status.setWordWrap(True)
+        row.addWidget(self.hub_status, 1)
+        holder = QWidget()
+        holder.setLayout(row)
+        hl.addRow("", holder)
+        hint = QLabel("Sends a status summary (versions, which files differ, rulebook, alerts, system info — never file "
+                      "contents) every 5 minutes and right after changes. The hub is a separate small web server you "
+                      "host yourself; see the README. Leave this off if you don't use one.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#555")
+        hl.addRow("", hint)
+        lay.addWidget(hub)
+        self.update_hub_status()
+
         box2 = QGroupBox("Other sims (from the shared location)")
         b2 = QVBoxLayout(box2)
         row = QHBoxLayout()
@@ -2743,6 +2779,72 @@ class MainWindow(QMainWindow):
             elif done:
                 done(fut.result())
         QTimer.singleShot(150, poll)
+
+    # ---------------- central dashboard (hub)
+    def update_hub_status(self):
+        if not hasattr(self, "hub_status"):
+            return
+        if self.repo.get("hub_enabled") != "1":
+            self.hub_status.setText("<span style='color:#777'>Off.</span>")
+            return
+        ok = float(self.repo.get("hub_last_ok") or 0)
+        err = self.repo.get("hub_last_error")
+        if err:
+            self.hub_status.setText(f"<span style='color:#c62828'>✖ {html.escape(err)}</span>")
+        elif ok:
+            self.hub_status.setText(f"<span style='color:#2e7d32'>✔ Last report {fmt_ts(ok)}</span>")
+        else:
+            self.hub_status.setText("Waiting for the first report…")
+
+    def save_hub(self):
+        self.repo.set("hub_enabled", "1" if self.hub_enable.isChecked() else "0")
+        self.repo.set("hub_url", self.hub_url.text().strip())
+        self.repo.set("hub_key", self.hub_key.text().strip())
+        self.repo.set("hub_last_error", "")
+        if not self.hub_enable.isChecked():
+            self.update_hub_status()
+            return
+        if self.remote:
+            self.hub_status.setText("Saved. The sim itself sends the reports.")
+            return
+        self.hub_tick(force=True)
+
+    def hub_tick(self, force: bool = False):
+        if self.remote or self.repo.get("hub_enabled") != "1" or getattr(self, "_hub_busy", False):
+            return
+        try:
+            sig = self.repo.hub_signature()
+        except Exception:  # noqa: BLE001
+            return
+        last = float(self.repo.get("hub_last_try") or 0)
+        due = force or sig != getattr(self, "_hub_sig", None) or core.now_ts() - last >= 300
+        if not due:
+            return
+        self._hub_busy = True
+        self.repo.set("hub_last_try", core.now_ts())
+        url, key = self.repo.get("hub_url"), self.repo.get("hub_key")
+        cache = getattr(self.repo, "_probe_cache", None)
+
+        def work(r):
+            if cache is not None:
+                r._probe_cache = cache          # reuse the app's system-info readings
+                r.background_probes = True
+            return core.hub_push(r, url, key)
+
+        def ok(res):
+            self._hub_busy = False
+            self._hub_sig = sig
+            self.repo.set("hub_last_ok", core.now_ts())
+            self.repo.set("hub_last_error", "")
+            self.update_hub_status()
+            if force:
+                self.statusBar().showMessage(f"Reported to the hub as '{res.get('sim', '?')}'", 6000)
+
+        def fail(e):
+            self._hub_busy = False
+            self.repo.set("hub_last_error", str(e))
+            self.update_hub_status()
+        self.run_bg(work, ok, fail)
 
     def auto_push(self):
         if self.remote:
