@@ -72,7 +72,7 @@ def scan_tree(roots: list[str], hashes: bool = True, keep: Optional[Callable[[st
                     st = os.stat(p)
                 except OSError:
                     continue
-                size, mtime = st.st_size, int(st.st_mtime)
+                size, mtime = st.st_size, st.st_mtime_ns
                 h = None
                 old = (previous or {}).get(p)
                 if old and old[0] == size and old[1] == mtime and old[2]:

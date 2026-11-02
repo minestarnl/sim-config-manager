@@ -170,3 +170,51 @@ test("full flow: auth, sims, reports, events, webhooks, maintenance, notes, csv,
     throw e;
   }
 });
+
+test("operations: hardware NO-GO, maintenance from the phone, photos, explain", async () => {
+  const { base, close } = await startHub();
+  try {
+    const admin = client(base), tech = client(base), viewer = client(base);
+    await admin("/api/login", { method: "POST", body: { name: "admin", password: "secret" } });
+    await tech("/api/login", { method: "POST", body: { name: "tech", password: "tech-pw" } });
+    await viewer("/api/login", { method: "POST", body: { name: "office", password: "view-pw" } });
+    const { body: sim } = await admin("/api/sims", { method: "POST", body: { name: "Sim 1" } });
+    const sendReport = (over) => fetch(`${base}/api/v1/report`, { method: "POST", headers: {
+      "Content-Type": "application/json", Authorization: `Bearer ${sim.key}` }, body: JSON.stringify(report(over)) })
+      .then((r) => r.json());
+    const tasks = [{ id: 7, name: "Clean filters", state: "overdue", due_date: Date.now() / 1000 - 86400 }];
+    await sendReport({ hardware_missing: ["MCP"], maintenance_overdue: ["Clean filters"], maintenance: tasks,
+      last_session: { started: 1, avg_fps: 41, crashed: true } });
+    let s = (await viewer(`/api/sims/${sim.id}`)).body.summary;
+    assert.equal(s.ready, false);
+    assert.equal(s.state, "bad");
+    assert.ok(s.problems.some((p) => p.includes("Cockpit hardware missing: MCP")));
+    assert.ok(s.problems.some((p) => p.includes("Maintenance overdue")));
+    const ex = (await viewer(`/api/sims/${sim.id}/explain`)).body;
+    assert.equal(ex.source, "rules");
+    assert.match(ex.text, /NO-GO because/);
+    assert.match(ex.text, /Reconnect the missing hardware/);
+
+    // maintenance done on the phone → command delivered with the next report response, once
+    assert.equal((await viewer(`/api/sims/${sim.id}/maintenance-done`, { method: "POST", body: { task: 7 } })).status, 403);
+    assert.equal((await tech(`/api/sims/${sim.id}/maintenance-done`, { method: "POST", body: { task: 7, note: "both" } })).body.queued, true);
+    const r1 = await sendReport({ maintenance: tasks });
+    assert.equal(r1.commands.length, 1);
+    assert.deepEqual([r1.commands[0].type, r1.commands[0].task, r1.commands[0].by], ["maintenance_done", 7, "tech"]);
+    assert.equal((await sendReport({})).commands.length, 0);
+    s = (await viewer(`/api/sims/${sim.id}`)).body.summary;
+    assert.equal(s.ready, true);
+
+    // logbook with a photo from the phone
+    const png = "data:image/png;base64," + Buffer.from("89504e470d0a1a0a0000000d4948445200000001", "hex").toString("base64");
+    const n = await tech(`/api/sims/${sim.id}/notes`, { method: "POST", body: { text: "Left projector flickers", category: "hardware", photo: png } });
+    assert.match(n.body.note.photo, /^[a-f0-9]+\.png$/);
+    const img = await viewer(`/api/photos/${n.body.note.photo}`);
+    assert.equal(img.status, 200);
+    assert.equal(img.headers.get("content-type"), "image/png");
+    assert.equal((await client(base)(`/api/photos/${n.body.note.photo}`)).status, 401);
+    assert.equal((await tech(`/api/sims/${sim.id}/notes`, { method: "POST", body: { text: "x", photo: "data:text/html;base64,AAAA" } })).status, 400);
+    // QR library and phone route are served
+    assert.equal((await viewer("/qrcode.js")).status, 200);
+  } finally { await close(); }
+});

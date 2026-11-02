@@ -9,6 +9,7 @@ looks up the matching 4663 events and stores "changed by <program> (<user>)" nex
 from __future__ import annotations
 
 import os
+import re
 from typing import Optional
 
 from . import winsys
@@ -87,7 +88,7 @@ def attribute_change(repo, file_id: int, new_hash: Optional[str], since: float) 
     if not ev:
         return None
     last = ev[-1]
-    proc = os.path.basename(str(last.get("process") or "")) or "?"
+    proc = re.split(r"[\\/]", str(last.get("process") or ""))[-1] or "?"   # Windows path, also when tested elsewhere
     who = {"process": proc, "user": str(last.get("user") or "").strip("\\"), "ts": last.get("ts")}
     repo.db.execute("INSERT OR REPLACE INTO change_actors(file_id, hash, ts, process, user) VALUES(?,?,?,?,?)",
                     (file_id, new_hash or "", who["ts"] or now_ts(), who["process"], who["user"]))

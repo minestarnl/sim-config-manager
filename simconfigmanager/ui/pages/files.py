@@ -62,7 +62,7 @@ class FilesPage:
         self.hist_label = QLabel()
         ll.addWidget(self.hist_label)
         self.ver_table = QTableWidget()
-        setup_table(self.ver_table, ["When", "Snapshot", "Lines +/-", "Note"], 3)
+        setup_table(self.ver_table, ["When", "Snapshot", "Lines +/-", "Changed by", "Note"], 4)
         self.ver_table.doubleClicked.connect(lambda _i: self.diff_version_prev())
         ll.addWidget(self.ver_table)
         ll.addLayout(button_row(("Open this revision", self.view_version),
@@ -113,6 +113,7 @@ class FilesPage:
             return
         self.hist_label.setText(f"<b>Revisions of {html.escape(f.display)}</b> — {html.escape(f.path)}")
         hist = self.repo.file_history(f.id)
+        actors = self.repo.change_actors(f.id)
         self.ver_table.setRowCount(len(hist))
         for r, v in enumerate(hist):
             prev = hist[r + 1].hash if r + 1 < len(hist) else None
@@ -124,7 +125,8 @@ class FilesPage:
             self.ver_table.setItem(r, 0, item(fmt_ts(v.created_at), (v.snapshot_id, v.hash, prev)))
             self.ver_table.setItem(r, 1, item(f"#{v.snapshot_id}"))
             self.ver_table.setItem(r, 2, item(pm))
-            self.ver_table.setItem(r, 3, item(v.message))
+            self.ver_table.setItem(r, 3, item(actors.get(v.hash or "", "")))
+            self.ver_table.setItem(r, 4, item(v.message))
 
     def current_version(self):
         d = selected_data(self.ver_table)

@@ -136,7 +136,7 @@ def install_bridge(repo, folder: str) -> str:
     out.parent.mkdir(parents=True, exist_ok=True)
     write_file_atomic(os.path.join(folder, LUA_NAME + ".lua"),
                       LUA_BRIDGE.replace("__OUT__", str(out)).encode("utf-8"))
-    text = Path(ini).read_text(encoding="utf-8", errors="replace")
+    text = Path(ini).read_bytes().decode("utf-8", errors="replace")    # keep CRLF line endings as they are
     if re.search(rf"^\s*\d+\s*=\s*Lua\s+{LUA_NAME}\s*$", text, re.I | re.M):
         return ini
     nl = "\r\n" if "\r\n" in text else "\n"

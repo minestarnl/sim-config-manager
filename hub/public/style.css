@@ -121,6 +121,22 @@ code.key { display: block; background: var(--bg); padding: 8px; border-radius: 4
 .tile.maint { border-color: var(--purple); } .tile.offline { border-color: var(--faint); }
 .clock { font-size: 18px; color: var(--muted); }
 #statusbar span, #userbox, #title { white-space: nowrap; }
+img.photo { max-width: 220px; max-height: 160px; border-radius: 4px; margin-top: 6px; display: block; }
+.explain { line-height: 1.5; }
+button.wide, .btn.wide { width: 100%; padding: 10px; margin: 6px 0; text-align: center; display: block; font-size: 15px; }
+.phone { max-width: 520px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
+.phone .tile { text-align: center; }
+.phone textarea { min-height: 90px; font-size: 15px; }
+.tile.ok { border-color: var(--green); } .tile.bad { border-color: var(--red); } .tile.off { border-color: var(--faint); }
+.stickers { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 16px; }
+.sticker { border: 1px dashed var(--border); border-radius: 10px; padding: 14px; text-align: center; background: #fff; color: #111; }
+.sticker .nm { font-size: 22px; font-weight: 700; margin-top: 6px; }
+img.qr { width: 180px; height: 180px; image-rendering: pixelated; }
+@media print {
+  #activity, #pagehead, #statusbar, .noprint { display: none !important; }
+  body, #view { background: #fff; padding: 0; overflow: visible; }
+  .sticker { break-inside: avoid; border: 1px solid #999; }
+}
 @media (max-width: 700px) {
   #activity { width: 44px; } #activity a { height: 44px; }
   .cols { grid-template-columns: 1fr; } #view { padding: 10px; }

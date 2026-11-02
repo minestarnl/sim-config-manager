@@ -10,12 +10,13 @@ import { fileURLToPath } from "node:url";
 import { loadConfig, checkPassword, hashPassword } from "./config.js";
 import { Store } from "./store.js";
 import { sendWebhooks } from "./notify.js";
+import { explain } from "./explain.js";
 
-export const HUB_VERSION = "1.0.0";
+export const HUB_VERSION = "1.1.0";
 const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8", ".ttf": "font/ttf", ".svg": "image/svg+xml", ".json": "application/json",
-  ".png": "image/png", ".ico": "image/x-icon" };
+  ".png": "image/png", ".ico": "image/x-icon", ".jpg": "image/jpeg", ".webp": "image/webp" };
 const ROLE_RANK = { viewer: 1, tech: 2, admin: 3 };
 
 const toMs = (ts) => (!ts ? 0 : ts < 1e12 ? Math.round(ts * 1000) : ts);
@@ -34,11 +35,19 @@ export function simState(sim, now, offlineMs) {
   if (mism.length) problems.push(`${mism.length} file(s) differ from v${r.version?.number ?? "?"}`);
   if (viol.length) problems.push(`Rulebook broken: ${viol.join(", ")}`);
   if (r.pending_proposals) problems.push(`${r.pending_proposals} proposed change(s) waiting for approval`);
+  const hw = r.hardware_missing || [];
+  if (hw.length) problems.push(`Cockpit hardware missing: ${hw.join(", ")}`);
+  const overdue = r.maintenance_overdue || [];
+  if (overdue.length) problems.push(`Maintenance overdue: ${overdue.join(", ")}`);
+  for (const w of (r.health_warnings || []).slice(0, 3)) problems.push(`Health: ${w}`);
+  if ((r.integrity_problems || []).length) problems.push(`Integrity check found differences: ${r.integrity_problems.join(", ")}`);
+  if (r.last_session?.crashed) problems.push("The last session ended with a crash");
   let state = "ok";
   if (!online) state = "offline";
-  else if (viol.length || mism.some((m) => m.status === "missing")) state = "bad";
-  else if (mism.length || !r.version) state = "warn";
-  const ready = online && !sim.maintenance?.on && !!r.version && !mism.length && !viol.length;
+  else if (viol.length || hw.length || mism.some((m) => m.status === "missing")) state = "bad";
+  else if (mism.length || !r.version || overdue.length || (r.health_warnings || []).length ||
+    (r.integrity_problems || []).length || r.last_session?.crashed) state = "warn";
+  const ready = online && !sim.maintenance?.on && !!r.version && !mism.length && !viol.length && !hw.length;
   return { online, state, problems, ready };
 }
 
@@ -58,6 +67,9 @@ export function summary(sim, now, offlineMs) {
     violations: (r.rulebook_violations || []).length, alerts24h: r.alerts_24h || 0,
     pending: r.pending_proposals || 0, files: r.files_count ?? r.files ?? 0, appVersion: r.app_version || "",
     driver: gpuDriver(r), lastChange: toMs(r.last_change), notes: (sim.notes || []).length,
+    hardwareMissing: r.hardware_missing || [], maintenanceOverdue: r.maintenance_overdue || [],
+    maintenanceSoon: r.maintenance_soon || [], healthWarnings: r.health_warnings || [],
+    lastSession: r.last_session || null, simHours: r.sim_hours || 0,
   };
 }
 
@@ -135,6 +147,14 @@ export function createHub(cfgOverrides = {}) {
     const lastAlert = Math.max(0, ...(prev.recent_alerts || []).map((a) => toMs(a.ts)));
     for (const a of (cur.recent_alerts || []).slice().reverse()) {
       if (toMs(a.ts) > lastAlert) emit(id, "alert", a.message, "alert", { at: toMs(a.ts) });
+    }
+    const ph = new Set(prev.hardware_missing || []), ch = new Set(cur.hardware_missing || []);
+    for (const h of ch) if (!ph.has(h)) emit(id, "hardware", `Cockpit hardware missing: ${h}`, "alert");
+    for (const h of ph) if (!ch.has(h)) emit(id, "hardware", `Cockpit hardware connected again: ${h}`);
+    const po = new Set(prev.maintenance_overdue || []);
+    for (const t of cur.maintenance_overdue || []) if (!po.has(t)) emit(id, "maintenance", `Maintenance overdue: ${t}`, "warning");
+    if (cur.last_session?.crashed && cur.last_session.started !== prev.last_session?.started) {
+      emit(id, "crash", "The sim crashed during the last session", "alert");
     }
     if ((cur.pending_proposals || 0) > (prev.pending_proposals || 0)) {
       emit(id, "proposal", `${cur.pending_proposals} AI-proposed change(s) waiting for approval`);
@@ -255,7 +275,7 @@ export function createHub(cfgOverrides = {}) {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "no-referrer");
     res.setHeader("X-Frame-Options", "DENY");
-    res.setHeader("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; " +
+    res.setHeader("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; " +
       "script-src 'self'; font-src 'self'; connect-src 'self'; frame-ancestors 'none'");
     const url = new URL(req.url, "http://hub");
     const p = url.pathname;
@@ -272,7 +292,10 @@ export function createHub(cfgOverrides = {}) {
       const report = await json(req, (cfg.maxReportKB || 2048) * 1024);
       if (typeof report !== "object" || Array.isArray(report)) return send(res, 400, { error: "Expected an object" });
       ingest(sim, report, clientIp(req));
-      return send(res, 200, { ok: true, sim: sim.name, maintenance: sim.maintenance?.on || false, serverTime: now });
+      const commands = sim.commands || [];
+      if (commands.length) { sim.commands = []; store.save(); }   // delivered once; the app logs what it applied
+      return send(res, 200, { ok: true, sim: sim.name, maintenance: sim.maintenance?.on || false, serverTime: now,
+        commands });
     }
 
     // -- auth
@@ -309,7 +332,8 @@ export function createHub(cfgOverrides = {}) {
     if (p === "/api/me") {
       const s = session(req);
       return send(res, 200, { user: s ? { name: s.name, role: s.role } : null, title: cfg.title, hub: HUB_VERSION,
-        offlineAfterMinutes: cfg.offlineAfterMinutes, usersConfigured: !!cfg.users?.length });
+        offlineAfterMinutes: cfg.offlineAfterMinutes, usersConfigured: !!cfg.users?.length,
+        ai: !!cfg.anthropicApiKey });
     }
 
     // -- read (viewer+)
@@ -358,14 +382,44 @@ export function createHub(cfgOverrides = {}) {
       const s = need(req, res, "tech"); if (!s) return;
       const sim = store.sims[m[1]];
       if (!sim) return send(res, 404, { error: "No such sim" });
-      const body = await json(req);
+      const body = await json(req, 9 * 1024 * 1024);
       const text = String(body.text || "").trim().slice(0, 4000);
       if (!text) return send(res, 400, { error: "Empty note" });
       const note = { ts: now, author: s.name, text, category: String(body.category || "note").slice(0, 30) };
+      if (body.photo) note.photo = store.savePhoto(String(body.photo));
       (sim.notes ||= []).unshift(note);
       store.save();
       emit(sim.id, "note", `${s.name}: ${text.slice(0, 140)}`);
       return send(res, 200, { ok: true, note });
+    }
+    if ((m = p.match(/^\/api\/photos\/([a-f0-9]+\.(?:jpg|png|webp))$/)) && req.method === "GET") {
+      if (!need(req, res, "viewer")) return;
+      const file = store.photoPath(m[1]);
+      if (!file) return send(res, 404, { error: "Not found" });
+      res.writeHead(200, { "Content-Type": MIME[path.extname(file)] || "image/jpeg", "Cache-Control": "private, max-age=86400" });
+      return fs.createReadStream(file).pipe(res);
+    }
+    if ((m = p.match(/^\/api\/sims\/([a-f0-9]+)\/maintenance-done$/)) && req.method === "POST") {
+      const s = need(req, res, "tech"); if (!s) return;
+      const sim = store.sims[m[1]];
+      if (!sim) return send(res, 404, { error: "No such sim" });
+      const body = await json(req);
+      const task = (sim.report?.maintenance || []).find((t) => String(t.id) === String(body.task));
+      if (!task) return send(res, 404, { error: "No such maintenance task" });
+      (sim.commands ||= []).push({ id: crypto.randomBytes(6).toString("hex"), type: "maintenance_done", task: task.id,
+        by: s.name, note: String(body.note || "").slice(0, 300) });
+      task.state = "ok"; task.last_done = now / 1000;
+      sim.report.maintenance_overdue = (sim.report.maintenance_overdue || []).filter((x) => x !== task.name);
+      store.save();
+      emit(sim.id, "maintenance", `Maintenance done: ${task.name} (${s.name})`);
+      broadcast("sim", summary(sim, now, offlineMs));
+      return send(res, 200, { ok: true, queued: true });
+    }
+    if ((m = p.match(/^\/api\/sims\/([a-f0-9]+)\/explain$/)) && req.method === "GET") {
+      if (!need(req, res, "viewer")) return;
+      const sim = store.sims[m[1]];
+      if (!sim) return send(res, 404, { error: "No such sim" });
+      return send(res, 200, await explain(cfg, sim, summary(sim, now, offlineMs), log));
     }
     if ((m = p.match(/^\/api\/sims\/([a-f0-9]+)\/maintenance$/)) && req.method === "POST") {
       const s = need(req, res, "tech"); if (!s) return;

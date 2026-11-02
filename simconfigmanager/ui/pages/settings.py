@@ -55,6 +55,11 @@ class SettingsPage:
         cbv.setChecked(self.repo.get("notify_version_drift") != "0")
         cbv.toggled.connect(lambda v: self.repo.set("notify_version_drift", "1" if v else "0"))
         form.addRow("", cbv)
+        self.audit_cb = QCheckBox("Record which program and Windows user changed a file (Windows file auditing)")
+        self.audit_cb.setChecked(self.repo.get("audit_enabled") == "1")
+        self.audit_cb.setToolTip("Shown as 'Changed by' in a file's revisions and in the event log")
+        self.audit_cb.toggled.connect(self.toggle_audit)
+        form.addRow("", self.audit_cb)
         self.autostart_cb = QCheckBox("Start with Windows as administrator (runs in the system tray)")
         self.autostart_cb.setChecked(False if self.remote else core.autostart_enabled())
         self.autostart_cb.setEnabled(sys.platform == "win32")
@@ -170,3 +175,21 @@ class SettingsPage:
             core.set_autostart(on)
         except OSError as e:
             fail(self, "change the startup setting", e)
+
+    def toggle_audit(self, on: bool):
+        if not on:
+            self.repo.set("audit_enabled", "0")
+            self.repo.log("'Who changed it' switched off")
+            return
+
+        def done(res):
+            if not res.get("ok"):
+                self.audit_cb.blockSignals(True)
+                self.audit_cb.setChecked(False)
+                self.audit_cb.blockSignals(False)
+                fail(self, "switch on file auditing", res.get("message"))
+            else:
+                self.notify(f"'Who changed it' is on for {res['files']} file(s)"
+                            + (f" ({len(res['failed'])} failed)" if res.get("failed") else ""))
+        self.run_bg(lambda r: r.enable_file_auditing(), done, lambda e: fail(self, "switch on file auditing", e),
+                    write=True)

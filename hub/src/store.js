@@ -2,6 +2,7 @@
 //   sims.json            sims (key hashes, latest report, maintenance, logbook)
 //   events.jsonl         fleet-wide event feed (append-only)
 //   samples/<id>.jsonl   heartbeat samples per sim (for uptime)
+//   photos/<hex>.jpg     photos attached to logbook entries (from the phone page)
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -12,6 +13,7 @@ export class Store {
   constructor(dir) {
     this.dir = dir;
     fs.mkdirSync(path.join(dir, "samples"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "photos"), { recursive: true });
     this.simsFile = path.join(dir, "sims.json");
     this.eventsFile = path.join(dir, "events.jsonl");
     this.sims = fs.existsSync(this.simsFile) ? JSON.parse(fs.readFileSync(this.simsFile, "utf8")) : {};
@@ -82,6 +84,22 @@ export class Store {
     if (sim) ev = ev.filter((e) => e.sim === sim);
     if (level) ev = ev.filter((e) => e.level === level);
     return ev.slice(-limit).sort((a, b) => b.ts - a.ts);
+  }
+
+  // ----- photos (data URL from the browser → file)
+  savePhoto(dataUrl) {
+    const m = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+    if (!m) throw Object.assign(new Error("Photo must be a JPEG, PNG or WebP image"), { code: 400 });
+    const buf = Buffer.from(m[2], "base64");
+    if (buf.length > 8 * 1024 * 1024) throw Object.assign(new Error("Photo too large (max 8 MB)"), { code: 413 });
+    const name = crypto.randomBytes(12).toString("hex") + (m[1] === "jpeg" ? ".jpg" : `.${m[1]}`);
+    fs.writeFileSync(path.join(this.dir, "photos", name), buf);
+    return name;
+  }
+
+  photoPath(name) {
+    const f = path.join(this.dir, "photos", path.basename(name));
+    return fs.existsSync(f) ? f : null;
   }
 
   // ----- heartbeat samples (one line per report, compacted to ≥60 s apart)

@@ -14,6 +14,8 @@ const DEFAULTS = {
   kioskToken: "",
   webhooks: [],
   maxReportKB: 2048,
+  anthropicApiKey: "",                 // optional: "Why is this sim NO-GO?" answered by Claude
+  anthropicModel: "claude-sonnet-5-5",
 };
 
 export function loadConfig(overrides = {}) {
@@ -29,6 +31,7 @@ export function loadConfig(overrides = {}) {
   if (process.env.SCM_HUB_TITLE) env.title = process.env.SCM_HUB_TITLE;
   if (process.env.SCM_HUB_KIOSK_TOKEN) env.kioskToken = process.env.SCM_HUB_KIOSK_TOKEN;
   if (process.env.SCM_HUB_TRUST_PROXY) env.trustProxy = process.env.SCM_HUB_TRUST_PROXY === "1";
+  if (process.env.ANTHROPIC_API_KEY) env.anthropicApiKey = process.env.ANTHROPIC_API_KEY;
   const cfg = { ...DEFAULTS, ...fromFile, ...env, ...overrides };
   // Quick start: ADMIN_PASSWORD env var creates/overrides the "admin" user.
   if (process.env.SCM_HUB_ADMIN_PASSWORD) {

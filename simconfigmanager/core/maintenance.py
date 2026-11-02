@@ -36,14 +36,24 @@ SOON_HOURS = 10
 # --------------------------------------------------------------------------- PJLink (projectors)
 
 
+def _read_cr(sock) -> str:
+    """PJLink lines end with a carriage return (CR) only."""
+    buf = b""
+    while not buf.endswith(b"\r") and len(buf) < 512:
+        ch = sock.recv(1)
+        if not ch:
+            break
+        buf += ch
+    return buf.decode("utf-8", "replace").strip()
+
+
 def pjlink_query(host: str, password: str = "", commands=("POWR", "LAMP", "ERST", "NAME", "INF1", "INF2"),
                  port: int = 4352, timeout: float = 4) -> dict:
     """Ask a projector over PJLink class 1. Returns {"POWR": "1", "LAMP": "1234 1", ...} or raises OSError."""
     out: dict = {}
     with socket.create_connection((host, port), timeout=timeout) as s:
         s.settimeout(timeout)
-        f = s.makefile("rb")
-        greet = f.readline().decode("ascii", "replace").strip()
+        greet = _read_cr(s)
         prefix = ""
         if greet.startswith("PJLINK 1"):
             if not password:
@@ -54,7 +64,7 @@ def pjlink_query(host: str, password: str = "", commands=("POWR", "LAMP", "ERST"
         for cmd in commands:
             s.sendall(f"{prefix}%1{cmd} ?\r".encode("ascii"))
             prefix = ""   # the digest is only sent with the first command
-            line = f.readline().decode("utf-8", "replace").strip()
+            line = _read_cr(s)
             if line.upper().startswith("PJLINK ERRA"):
                 raise PermissionError("Wrong PJLink password")
             if "=" in line:

@@ -82,6 +82,18 @@ def test_app_reports_to_hub():
         assert d["report"]["rulebook"][0]["ok"] is False
         types = {e["type"] for e in call("/api/events")["events"]}
         assert {"drift", "rulebook", "alert"} <= types, types
+
+        # maintenance done on the Hub's phone page reaches the sim with the next report
+        repo.save_maintenance_task({"name": "Clean filters", "every_days": 1})
+        repo.db.execute("UPDATE maint_tasks SET created=?", (time.time() - 3 * 86400,))
+        repo.db.commit()
+        core.hub_push(repo, base, key)
+        task = call(f"/api/sims/{s['id']}")["report"]["maintenance"][0]
+        assert task["state"] == "overdue" and "Maintenance overdue" in " ".join(call("/api/sims")["sims"][0]["problems"])
+        call(f"/api/sims/{s['id']}/maintenance-done", {"task": task["id"], "note": "done"}, "POST")
+        res = core.hub_push(repo, base, key)
+        assert res["applied"], res
+        assert repo.maintenance_tasks()[0]["state"] != "overdue" and repo.maintenance_log()[0]["by"] == "admin"
         print("HUB OK")
     finally:
         proc.terminate()
