@@ -118,6 +118,30 @@ def test_mcp_end_to_end():
                            replacements=[{"find": "</Server>", "replace": "</Srv>"}])
         assert err and "valid XML" in text
         assert b"192.168.10.20" in (sim / "config.xml").read_bytes()  # untouched
+
+        # prompts
+        pl = c.send("prompts/list")["result"]["prompts"]
+        assert {"troubleshoot", "pre_session_review", "compare_sims"} <= {p["name"] for p in pl}
+        pg = c.send("prompts/get", {"name": "troubleshoot", "arguments": {"symptom": "stutters"}})["result"]
+        assert "stutters" in pg["messages"][0]["content"]["text"]
+        # setting-level summary in diffs
+        text, err = c.call("diff", file="Prepar3D.cfg")
+        assert "[TERRAIN] LOD_RADIUS: 6.500000 → 4.500000" in text, text
+    finally:
+        c.close()
+
+    # rulebook: locked value → proposal refused, tool lists it
+    repo.save_rulebook_entry({"file_id": repo.files()[0].id if repo.files()[0].display == "Prepar3D.cfg"
+                              else repo.files()[1].id, "selector": "GRAPHICS/TEXTURE_MAX_LOAD", "required": "4096",
+                              "note": "certified"})
+    c = Client(tmp / "data")
+    try:
+        c.send("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t"}})
+        text, err = c.call("rulebook")
+        assert "[OK]" in text and "TEXTURE_MAX_LOAD" in text, text
+        text, err = c.call("propose_change", file="Prepar3D.cfg", reason="more fps",
+                           replacements=[{"find": "TEXTURE_MAX_LOAD=4096", "replace": "TEXTURE_MAX_LOAD=1024"}])
+        assert err and "rulebook" in text, text
     finally:
         c.close()
 

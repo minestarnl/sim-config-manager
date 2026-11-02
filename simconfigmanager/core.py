@@ -491,6 +491,10 @@ CREATE TABLE IF NOT EXISTS rules (
 CREATE TABLE IF NOT EXISTS versions (
     id INTEGER PRIMARY KEY, number INTEGER UNIQUE, title TEXT, notes TEXT, snapshot_id INTEGER,
     created_at REAL, created_by TEXT, machine TEXT);
+CREATE TABLE IF NOT EXISTS ignores (
+    id INTEGER PRIMARY KEY, file_id INTEGER, kind TEXT, pattern TEXT, note TEXT);
+CREATE TABLE IF NOT EXISTS rulebook (
+    id INTEGER PRIMARY KEY, file_id INTEGER, selector TEXT, required TEXT, note TEXT, author TEXT, created REAL);
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY, ts REAL, level TEXT, file_id INTEGER, message TEXT);
 """
@@ -603,14 +607,14 @@ class Repo:
             if r else None
 
     def find_file_by_path(self, path: str) -> Optional[TrackedFile]:
-        norm = os.path.normcase(os.path.abspath(path))
+        norm = norm_path(path)
         for f in self.files(include_inactive=True):
-            if os.path.normcase(os.path.abspath(f.path)) == norm:
+            if norm_path(f.path) == norm:
                 return f
         return None
 
     def add_file(self, path: str, label: str = "", group: str = "") -> TrackedFile:
-        path = os.path.abspath(path)
+        path = path if path.startswith(PROBE_PREFIX) else os.path.abspath(path)
         existing = self.find_file_by_path(path)
         if existing:
             if not existing.active:
@@ -644,7 +648,8 @@ class Repo:
         if group is not None:
             self.db.execute("UPDATE files SET group_name=? WHERE id=?", (group, file_id))
         if path is not None:
-            self.db.execute("UPDATE files SET path=? WHERE id=?", (os.path.abspath(path), file_id))
+            self.db.execute("UPDATE files SET path=? WHERE id=?", (path if path.startswith(PROBE_PREFIX)
+                                                                   else os.path.abspath(path), file_id))
             self._stat_cache.pop(file_id, None)
         self.db.commit()
 
@@ -663,6 +668,9 @@ class Repo:
     # ---------------- reading current state
     def current_hash(self, f: TrackedFile, use_cache: bool = True) -> tuple[Optional[str], Optional[bytes]]:
         """Return (hash, data). data is None if unchanged-from-cache and not needed."""
+        if is_probe(f):
+            data = self.probe_output(f)
+            return (sha256_bytes(data) if data is not None else None), data
         try:
             st = os.stat(f.path)
         except (FileNotFoundError, NotADirectoryError):
@@ -689,10 +697,95 @@ class Repo:
         return h, data
 
     def read_current(self, f: TrackedFile) -> Optional[bytes]:
+        if is_probe(f):
+            return self.probe_output(f)
         try:
             return read_file_bytes(f.path)
         except PermissionError:
             return None
+
+    def write_file(self, f: TrackedFile, data: bytes, note: str = "", kind: str = "manual") -> None:
+        """Write new content to a tracked file with a safety snapshot before and a history entry after.
+        Every edit (editor, Claude/ChatGPT proposals, remote app) goes through here."""
+        if is_probe(f):
+            raise ValueError("System information can't be edited — it is read from the PC.")
+        cur = self.read_current(f)
+        if cur is not None:
+            self.put_object(cur)
+        self.commit(f"Before edit of {f.display}", kind="safety", file_ids=[f.id])
+        write_file_atomic(f.path, data)
+        self._stat_cache.pop(f.id, None)
+        self.commit(f"Edited {f.display}" + (f": {note}" if note else ""), kind=kind, file_ids=[f.id])
+
+    # ---------------- system information ("probes": command output tracked like a file)
+    def probe_output(self, f: TrackedFile, force: bool = False) -> Optional[bytes]:
+        cache = getattr(self, "_probe_cache", None)
+        if cache is None:
+            cache = self._probe_cache = {}
+        try:
+            minutes = float(self.get("probe_minutes") or 15)
+        except ValueError:
+            minutes = 15
+        hit = cache.get(f.path)
+        if hit and not force and now_ts() - hit[0] < minutes * 60:
+            return hit[1]
+        cmd = probe_command(self, f.path)
+        if cmd is None:
+            return None
+        data = run_probe(cmd)
+        if data is None and hit:       # keep the last good value if a run fails
+            data = hit[1]
+        cache[f.path] = (now_ts(), data)
+        return data
+
+    def refresh_probes(self) -> None:
+        for f in self.files():
+            if is_probe(f):
+                self.probe_output(f, force=True)
+
+    # ---------------- ignore rules (#1)
+    def ignores(self, file_id: Optional[int] = None) -> list[dict]:
+        rows = [dict(r) for r in self.db.execute("SELECT * FROM ignores ORDER BY id")]
+        if file_id is None:
+            return rows
+        return [r for r in rows if r["file_id"] in (None, file_id)]
+
+    def add_ignore(self, file_id: Optional[int], kind: str, pattern: str, note: str = "") -> int:
+        cur = self.db.execute("INSERT INTO ignores(file_id, kind, pattern, note) VALUES(?,?,?,?)",
+                              (file_id, kind, pattern, note))
+        self.db.commit()
+        self._same_cache = {}
+        f = self.file(file_id) if file_id else None
+        self.log(f"Now ignoring {IGNORE_KINDS.get(kind, kind)} '{pattern}'" + (f" in {f.display}" if f else ""))
+        return cur.lastrowid
+
+    def delete_ignore(self, ignore_id: int) -> None:
+        self.db.execute("DELETE FROM ignores WHERE id=?", (ignore_id,))
+        self.db.commit()
+        self._same_cache = {}
+
+    def same_content(self, f: TrackedFile, h1: Optional[str], h2: Optional[str],
+                     data2: Optional[bytes] = None) -> bool:
+        """True if two versions are equal once ignored settings are left out."""
+        if h1 == h2:
+            return True
+        if h1 is None or h2 is None:
+            return False
+        rules = self.ignores(f.id)
+        if not rules:
+            return False
+        cache = getattr(self, "_same_cache", None)
+        if cache is None:
+            cache = self._same_cache = {}
+        key = (f.id, h1, h2)
+        if key not in cache:
+            try:
+                a = self.get_object(h1)
+                b = data2 if data2 is not None else self.get_object(h2)
+            except FileNotFoundError:
+                return False
+            cache[key] = normalize_content(a, f.path, rules) == normalize_content(b, f.path, rules)
+        return cache[key]
 
     # ---------------- snapshots
     def snapshots(self, limit: int = 1000) -> list[Snapshot]:
@@ -791,8 +884,8 @@ class Repo:
             return "New" if h else "Missing"
         last = self.last_hash(f.id)
         if h is None:
-            return "Missing" if last is not None else "Missing"
-        return "OK" if h == last else "Changed"
+            return "Missing"
+        return "OK" if self.same_content(f, last, h) else "Changed"
 
     # ---------------- restore points
     def restore_points(self) -> list[RestorePoint]:
@@ -848,6 +941,8 @@ class Repo:
             if f is None:
                 continue
             cur, _ = self.current_hash(f)
+            if is_probe(f):
+                continue  # system information is read from the PC, never written
             if h is None:
                 out.append((f, "skip (did not exist then)"))
             elif cur == h:
@@ -873,6 +968,8 @@ class Repo:
             f = self.file(fid)
             if f is None:
                 continue
+            if is_probe(f):
+                continue
             if h is None:
                 report.append((f, "skipped (did not exist in that version)"))
                 continue
@@ -895,6 +992,8 @@ class Repo:
 
     def restore_version(self, file_id: int, h: str, label: str = "") -> None:
         f = self.file(file_id)
+        if is_probe(f):
+            raise ValueError("System information can't be restored — it is read from the PC.")
         self.commit(f"Safety copy before restoring {f.display}", kind="safety")
         write_file_atomic(f.path, self.get_object(h))
         self._stat_cache.pop(file_id, None)
@@ -932,6 +1031,8 @@ class Repo:
                 st = "match" if cur is not None else "gone"
             elif cur is None:
                 st = "missing"
+            elif self.same_content(f, vh, cur):
+                st = "match"
             else:
                 st = "modified"
             out.append(VersionStatus(f, st, vh, cur, True))
@@ -940,7 +1041,7 @@ class Repo:
         for fid, vh in ents.items():
             if fid not in tracked and vh is not None:
                 f = self.file(fid)
-                if f:
+                if f and not is_probe(f):
                     cur = sha256_bytes(read_file_bytes(f.path) or b"") if os.path.exists(f.path) else None
                     out.append(VersionStatus(f, "untracked", vh, cur, True))
         return ver, out
@@ -987,6 +1088,7 @@ class Repo:
         return "\n".join(lines)
 
     def create_version(self, title: str = "", notes: str = "", created_by: str = "") -> ConfigVersion:
+        self.refresh_probes()
         self.ensure_baseline()
         snap = self.commit(f"Version: {title}" if title else "New version", kind="manual") or self.latest_snapshot()
         if snap is None:
@@ -1050,6 +1152,8 @@ class Repo:
                 continue
             if new_data is None and new_h is not None:
                 new_data = self.read_current(f)
+            if self.same_content(f, old_h, new_h, new_data):
+                continue  # only ignored settings changed (e.g. values the sim rewrites on exit)
             try:
                 old_data = self.get_object(old_h)
             except FileNotFoundError:
@@ -1093,6 +1197,19 @@ class Repo:
                 level = "alert"
                 self.log(f"[{rule.name}] {alert.message}", level=level, file_id=ch.file.id)
                 alerts.append(alert)
+        # rulebook requirements (#6): alert once per new version of a file that breaks one
+        for ch in changes:
+            if ch.file.id in reverted_ids or ch.new_data is None:
+                continue
+            for e in rulebook_violations_for(self, ch.file, ch.new_data):
+                key = ("rb", e["id"], ch.file.id)
+                if self._alerted.get(key) == ch.new_hash:
+                    continue
+                self._alerted[key] = ch.new_hash
+                msg = (f"{ch.file.display}: {e['selector']} = {e['current']!r}, rulebook requires "
+                       f"{e['required']!r}" + (f" — {e['note']}" if e.get("note") else ""))
+                self.log(f"[Rulebook] {msg}", level="alert", file_id=ch.file.id)
+                alerts.append(Alert(Rule(0, "Rulebook", ch.file.id, "rulebook"), ch.file, msg))
         if self.get("auto_snapshot") == "1":
             ids = [c.file.id for c in changes if c.file.id not in reverted_ids]
             if ids:
@@ -1159,78 +1276,90 @@ class Repo:
 
 # --------------------------------------------------------------------------- cloud / network-folder sync
 
-class FolderSync:
+class Sync:
     """
-    Sync via any shared folder: Google Drive for Desktop (e.g. G:\\My Drive\\SimConfigManager),
-    a network share on a local server (\\\\server\\SimConfig), Dropbox, OneDrive...
+    Shares this PC's history with the other sims and keeps an off-site backup, through a storage backend:
+    a folder (Google Drive for Desktop, network share …) or Google Drive directly (see storage.py).
 
-    Each PC only ever writes its own manifest (machines/<name>.json); objects are immutable and
-    content-addressed, so two sims syncing at the same time never conflict.
+    Each PC only ever writes its own files (machines/<name>.json, status/<name>.json); objects are immutable
+    and content-addressed, so two sims syncing at the same time never conflict.
     """
 
-    def __init__(self, repo: Repo, folder: str):
+    def __init__(self, repo: Repo, backend):
         self.repo = repo
-        self.folder = Path(folder)
+        self.backend = backend
 
     @property
     def ok(self) -> bool:
-        return bool(str(self.folder)) and self.folder.is_dir()
+        return self.backend.ok()
 
-    def _obj(self, h: str) -> Path:
-        return self.folder / "objects" / h[:2] / h[2:]
+    @property
+    def where(self) -> str:
+        return self.backend.describe()
+
+    @staticmethod
+    def _okey(h: str) -> str:
+        return f"objects/{h[:2]}/{h[2:]}"
 
     def push(self) -> dict:
         if not self.ok:
-            raise FileNotFoundError(f"Sync folder not reachable: {self.folder}")
+            raise FileNotFoundError(f"Sync location not reachable: {self.where}")
         repo = self.repo
+        have = self.backend.object_names()
         copied = 0
         hashes = {r["hash"] for r in repo.db.execute("SELECT DISTINCT hash FROM entries WHERE hash IS NOT NULL")}
-        for h in hashes:
-            dst = self._obj(h)
-            if dst.exists():
-                continue
+        for h in sorted(hashes - have):
             src = repo.object_path_raw(h)
-            if not src.exists():
-                continue
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            tmp = dst.with_suffix(".tmp")
-            shutil.copyfile(src, tmp)
-            os.replace(tmp, dst)
-            copied += 1
+            if src.exists():
+                self.backend.write(self._okey(h), src.read_bytes())
+                copied += 1
         manifest = build_manifest(repo)
-        mdir = self.folder / "machines"
-        mdir.mkdir(parents=True, exist_ok=True)
-        dst = mdir / f"{safe_name(repo.machine)}.json"
-        tmp = dst.with_suffix(".tmp")
-        tmp.write_text(json.dumps(manifest), encoding="utf-8")
-        os.replace(tmp, dst)
-        repo.set("last_push", now_ts())
+        self.backend.write(f"machines/{safe_name(repo.machine)}.json", json.dumps(manifest).encode("utf-8"))
+        self.push_status()
+        if not repo.read_only:
+            repo.set("last_push", now_ts())
         return {"objects_copied": copied, "snapshots": len(manifest["snapshots"])}
 
-    def machines(self) -> list[dict]:
-        mdir = self.folder / "machines"
-        if not mdir.is_dir():
-            return []
+    def push_status(self, extra: Optional[dict] = None) -> dict:
+        st = build_status(self.repo)
+        if extra:
+            st.update(extra)
+        self.backend.write(f"status/{safe_name(self.repo.machine)}.json", json.dumps(st).encode("utf-8"))
+        return st
+
+    def statuses(self) -> list[dict]:
         out = []
-        for p in sorted(mdir.glob("*.json")):
+        for name in self.backend.list("status"):
+            if not name.endswith(".json"):
+                continue
             try:
-                m = json.loads(p.read_text(encoding="utf-8"))
-                out.append({"machine": m.get("machine", p.stem), "updated": m.get("updated", 0),
+                out.append(json.loads(self.backend.read(f"status/{name}")))
+            except (FileNotFoundError, ValueError):
+                continue
+        return out
+
+    def machines(self) -> list[dict]:
+        out = []
+        for name in self.backend.list("machines"):
+            if not name.endswith(".json"):
+                continue
+            try:
+                m = json.loads(self.backend.read(f"machines/{name}"))
+                out.append({"machine": m.get("machine", name[:-5]), "updated": m.get("updated", 0),
                             "files": len(m.get("files", [])), "snapshots": len(m.get("snapshots", [])),
-                            "file": str(p)})
-            except (OSError, ValueError):
+                            "file": name})
+            except (FileNotFoundError, ValueError):
                 continue
         return out
 
     def manifest(self, machine: str) -> dict:
-        p = self.folder / "machines" / f"{safe_name(machine)}.json"
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(self.backend.read(f"machines/{safe_name(machine)}.json"))
 
     def fetch(self, h: str) -> bytes:
-        p = self._obj(h)
-        if not p.exists():
-            raise FileNotFoundError(f"Object {h[:12]} not (yet) in sync folder — is Drive still syncing?")
-        return zlib.decompress(p.read_bytes())
+        try:
+            return zlib.decompress(self.backend.read(self._okey(h)))
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Version {h[:12]} is not (yet) in the sync location — still uploading?")
 
     def remote_latest(self, machine: str) -> list[dict]:
         """Latest version of every file on another machine."""
@@ -1242,8 +1371,97 @@ class FolderSync:
         return [dict(files[fid], hash=h) for fid, h in latest.items() if fid in files]
 
     def import_machine(self, machine: str) -> dict:
-        """Rebuild this PC's history from a cloud manifest (disaster recovery / new PC)."""
-        return import_manifest(self.repo, self.manifest(machine), self.fetch, f"cloud backup '{machine}'")
+        """Rebuild this PC's history from the shared backup (disaster recovery / new PC)."""
+        return import_manifest(self.repo, self.manifest(machine), self.fetch, f"shared backup '{machine}'")
+
+    def upload_archive(self, zip_path: str) -> str:
+        """Put a certification archive (and its .sha256) in archives/ of the sync location."""
+        name = os.path.basename(zip_path)
+        self.backend.write(f"archives/{name}", Path(zip_path).read_bytes())
+        side = Path(zip_path + ".sha256")
+        if side.exists():
+            self.backend.write(f"archives/{name}.sha256", side.read_bytes())
+        return name
+
+    def list_archives(self) -> list[str]:
+        return [n for n in self.backend.list("archives") if n.endswith(".zip")]
+
+    def download_archive(self, name: str, dest_dir: str) -> str:
+        dst = Path(dest_dir) / name
+        dst.write_bytes(self.backend.read(f"archives/{name}"))
+        try:
+            Path(str(dst) + ".sha256").write_bytes(self.backend.read(f"archives/{name}.sha256"))
+        except FileNotFoundError:
+            pass
+        return str(dst)
+
+
+class FolderSync(Sync):
+    """Sync through a plain folder (kept for compatibility)."""
+
+    def __init__(self, repo: Repo, folder: str):
+        from .storage import LocalBackend
+        super().__init__(repo, LocalBackend(folder))
+        self.folder = Path(folder)
+
+
+def drive_files(repo: Repo) -> dict:
+    d = repo.data_dir
+    return {"service_account": d / "gdrive_service_account.json", "client_secrets": d / "gdrive_client.json",
+            "token": d / "gdrive_token.json"}
+
+
+def make_sync(repo: Repo) -> Optional[Sync]:
+    """The configured sync location, or None. Settings: sync_mode = folder | gdrive."""
+    mode = repo.get("sync_mode") or ("folder" if repo.get("sync_folder") else "")
+    if mode == "folder" and repo.get("sync_folder"):
+        return FolderSync(repo, repo.get("sync_folder"))
+    if mode == "gdrive":
+        from . import storage
+        files = drive_files(repo)
+        auth = repo.get("gdrive_auth") or "service_account"
+        root = repo.get("gdrive_folder_id")
+        if not root:
+            return None
+        if auth == "service_account" and files["service_account"].exists():
+            prov = storage.service_account_token_provider(str(files["service_account"]))
+        elif auth == "user" and files["token"].exists():
+            prov = storage.user_token_provider(str(files["token"]))
+        else:
+            return None
+        return Sync(repo, storage.DriveBackend(prov, root, label="Google Drive"))
+    return None
+
+
+def build_status(repo: Repo) -> dict:
+    """Small heartbeat for the fleet overview (written every few minutes)."""
+    ver, status = repo.version_status()
+    mism = [x for x in status if x.status in ("modified", "missing", "new")]
+    day = now_ts() - 86400
+    alerts = [e for e in repo.events(500) if e["level"] in ("alert", "warning") and e["ts"] > day]
+    last = repo.latest_snapshot()
+    probes = {}
+    for f in repo.files():
+        if is_probe(f) and f.path in ("system://gpu", "system://windows"):
+            data = repo.read_current(f)
+            if data:
+                probes[f.path[9:]] = decode_text(data).strip()[:600]
+    try:
+        book = rulebook_status(repo)
+    except Exception:  # noqa: BLE001
+        book = []
+    return {
+        "machine": repo.machine, "app_version": APP_VERSION, "heartbeat": now_ts(),
+        "files": len(repo.files()),
+        "version": ({"number": ver.number, "title": ver.title, "created_at": ver.created_at} if ver else None),
+        "mismatches": [{"file": x.file.display, "group": x.file.group, "status": x.status} for x in mism],
+        "alerts_24h": len(alerts),
+        "recent_alerts": [{"ts": e["ts"], "message": e["message"]} for e in alerts[:5]],
+        "last_change": last.created_at if last else None,
+        "pending_proposals": len(list_proposals(repo, "pending")) if (repo.data_dir / "proposals").is_dir() else 0,
+        "rulebook_violations": [b["label"] for b in book if b["ok"] is False],
+        "system": probes,
+    }
 
 
 # --------------------------------------------------------------------------- portable paths
@@ -1862,15 +2080,10 @@ def apply_proposal(repo: "Repo", prop: dict, approved_by: str = "") -> None:
     data = proposal_data(prop)
     if sha256_bytes(data) != prop["new_hash"]:
         raise ValueError("Proposal is damaged (checksum mismatch).")
-    cur = read_file_bytes(f.path)
-    if cur is not None:
-        repo.put_object(cur)
-    repo.commit(f"Before applying Claude's change to {f.display}", kind="safety", file_ids=[f.id])
-    write_file_atomic(f.path, data)
-    repo._stat_cache.pop(f.id, None)
     who = f" (approved by {approved_by})" if approved_by else ""
-    repo.commit(f"Edited {f.display}: Claude — {prop['reason'][:150]}{who}", kind="manual", file_ids=[f.id])
-    repo.log(f"Applied Claude's change to {f.display}{who}: {prop['reason'][:200]}", file_id=f.id)
+    author = prop.get("author", "Claude")
+    repo.write_file(f, data, f"{author} — {prop['reason'][:150]}{who}")
+    repo.log(f"Applied {author}'s change to {f.display}{who}: {prop['reason'][:200]}", file_id=f.id)
     prop.update(status="applied", decided=now_ts(), approved_by=approved_by)
     _save_proposal(repo, prop)
 
@@ -1979,3 +2192,383 @@ def allow_users_to_propose(data_dir: Path) -> None:
     # S-1-5-32-545 = the local "Users" group (works in every Windows language)
     subprocess.run(["icacls", str(d), "/grant", "*S-1-5-32-545:(OI)(CI)M", "/Q"], capture_output=True,
                    **_no_window())
+
+
+# =========================================================================== system information (#3)
+
+PROBE_PREFIX = "system://"
+
+
+def is_probe(f) -> bool:
+    return bool(f) and str(getattr(f, "path", f)).startswith(PROBE_PREFIX)
+
+
+def norm_path(path: str) -> str:
+    return path.lower() if path.startswith(PROBE_PREFIX) else os.path.normcase(os.path.abspath(path))
+
+
+_PS_UTF8 = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ProgressPreference='SilentlyContinue'; "
+
+# key -> (label, PowerShell). Output must be stable (no timestamps) so a change means something changed.
+BUILTIN_PROBES = {
+    "gpu": ("Graphics cards & driver", r"""
+Get-CimInstance Win32_VideoController | Sort-Object Name | ForEach-Object {
+  "$($_.Name)"; "  Driver version : $($_.DriverVersion)"
+  if ($_.DriverDate) { "  Driver date    : $($_.DriverDate.ToString('yyyy-MM-dd'))" }
+  "  Video processor: $($_.VideoProcessor)" }
+if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+  ""; "nvidia-smi:"; nvidia-smi --query-gpu=name,driver_version,vbios_version,pcie.link.gen.max --format=csv,noheader }
+"""),
+    "windows": ("Windows version", r"""
+$v = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+$os = Get-CimInstance Win32_OperatingSystem
+"$($os.Caption)"; "Version $($v.DisplayVersion)  build $($v.CurrentBuild).$($v.UBR)"; "Edition $($v.EditionID)"
+"Architecture $($os.OSArchitecture)"
+"""),
+    "sim_software": ("Sim software versions", r"""
+$keys = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*','HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'
+$pat = '__PATTERN__'
+Get-ItemProperty $keys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and $_.DisplayName -match $pat } |
+  Sort-Object DisplayName -Unique | ForEach-Object { "{0}  |  {1}  |  {2}" -f $_.DisplayName, $_.DisplayVersion, $_.Publisher }
+"""),
+    "all_software": ("All installed software", r"""
+$keys = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+Get-ItemProperty $keys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and -not $_.SystemComponent } |
+  Sort-Object DisplayName -Unique | ForEach-Object { "{0}  |  {1}" -f $_.DisplayName, $_.DisplayVersion }
+"""),
+    "displays": ("Displays / projectors", r"""
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.Screen]::AllScreens | Sort-Object DeviceName | ForEach-Object {
+  "{0}  {1}x{2} at {3},{4}{5}" -f $_.DeviceName, $_.Bounds.Width, $_.Bounds.Height, $_.Bounds.X, $_.Bounds.Y, $(if ($_.Primary) {'  (primary)'} else {''}) }
+Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue | ForEach-Object {
+  $n = ($_.UserFriendlyName | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ }) -join ''
+  $m = ($_.ManufacturerName | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ }) -join ''
+  "Monitor: $m $n" } | Sort-Object
+"""),
+    "hardware": ("CPU, memory, motherboard", r"""
+$c = Get-CimInstance Win32_Processor | Select-Object -First 1
+"CPU: $($c.Name.Trim()) ($($c.NumberOfCores) cores / $($c.NumberOfLogicalProcessors) threads)"
+"RAM: {0:N0} GB" -f ((Get-CimInstance Win32_PhysicalMemory | Measure-Object Capacity -Sum).Sum / 1GB)
+$b = Get-CimInstance Win32_BaseBoard; "Motherboard: $($b.Manufacturer) $($b.Product)"
+"BIOS: $((Get-CimInstance Win32_BIOS).SMBIOSBIOSVersion)"
+Get-CimInstance Win32_DiskDrive | Sort-Object Index | ForEach-Object { "Disk $($_.Index): $($_.Model) {0:N0} GB" -f ($_.Size/1GB) }
+"""),
+    "network": ("Network addresses", r"""
+Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+  Sort-Object InterfaceAlias | ForEach-Object { "{0}: {1}/{2} ({3})" -f $_.InterfaceAlias, $_.IPAddress, $_.PrefixLength, $_.PrefixOrigin }
+"""),
+}
+DEFAULT_SIM_SOFTWARE_PATTERN = ("Prepar3D|Lockheed|ProSim|FSUIPC|SimConnect|Orbx|Active ?Sky|ChasePlane|PMDG|Aerosoft|"
+                                "NVIDIA|Leo Bodnar|Saitek|Logitech|Thrustmaster|Honeycomb|VATSIM|vPilot|Navigraph|"
+                                "FlyTampa|FSDreamTeam|REX|Envtex|EZdok|SODE|Immersive Display|Fly\\.?Elise|"
+                                "Visual C\\+\\+|DirectX|\\.NET")
+
+
+def probe_command(repo, path: str) -> Optional[list[str]]:
+    key = path[len(PROBE_PREFIX):]
+    if key in BUILTIN_PROBES:
+        if sys.platform != "win32":
+            return None
+        script = BUILTIN_PROBES[key][1]
+        if key == "sim_software":
+            pat = repo.get("sim_software_pattern") or DEFAULT_SIM_SOFTWARE_PATTERN
+            script = script.replace("__PATTERN__", pat.replace("'", "''"))
+        return ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+                _PS_UTF8 + script]
+    custom = custom_probes(repo).get(key)
+    if not custom:
+        return None
+    if sys.platform == "win32":
+        return ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+                _PS_UTF8 + custom["command"]]
+    return ["/bin/sh", "-c", custom["command"]]
+
+
+def custom_probes(repo) -> dict:
+    try:
+        return json.loads(repo.get("custom_probes") or "{}")
+    except ValueError:
+        return {}
+
+
+def add_custom_probe(repo, label: str, command: str, group: str = "System") -> TrackedFile:
+    probes = custom_probes(repo)
+    key = "custom_" + re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")[:40]
+    probes[key] = {"label": label, "command": command}
+    repo.set("custom_probes", json.dumps(probes))
+    return repo.add_file(PROBE_PREFIX + key, label, group)
+
+
+def run_probe(cmd: list[str], timeout: int = 90) -> Optional[bytes]:
+    import subprocess
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout, **_no_window())
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    out = r.stdout.decode("utf-8", errors="replace")
+    lines = [ln.rstrip() for ln in out.replace("\r\n", "\n").split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    while lines and not lines[0]:
+        lines.pop(0)
+    text = "\n".join(lines)
+    if r.returncode != 0 and not text:
+        err = r.stderr.decode("utf-8", errors="replace").strip()
+        text = f"(command failed: {err[:300]})"
+    return (text + "\n").encode("utf-8")
+
+
+def add_builtin_probe(repo, key: str, group: str = "System") -> TrackedFile:
+    label = BUILTIN_PROBES[key][0]
+    return repo.add_file(PROBE_PREFIX + key, label, group)
+
+
+# =========================================================================== ignore rules + setting diffs (#1)
+
+IGNORE_KINDS = {
+    "ini_key": "CFG/INI setting (Section/Key, wildcards * allowed)",
+    "ini_section": "Whole CFG/INI section (wildcards * allowed)",
+    "xml": "XML element (path, e.g. .//Window or .//Launch.Addon/Name)",
+    "line": "Lines matching a regular expression",
+}
+
+
+def kind_for_path(path: str, text: str = "") -> str:
+    p = path.lower()
+    if p.endswith((".xml", ".fxml", ".config")):
+        return "xml"
+    if p.endswith(".json"):
+        return "json"
+    if p.startswith(PROBE_PREFIX):
+        return "text"
+    if p.endswith((".cfg", ".ini", ".inf", ".dsd", ".ccp")):
+        return "xml" if text.lstrip().startswith("<") else "ini"
+    s = text.lstrip()
+    if s.startswith("<"):
+        return "xml"
+    return "ini" if re.search(r"^\s*\[[^\]]+\]\s*$", text, re.M) else "text"
+
+
+def normalize_content(data: Optional[bytes], path: str, rules: list[dict]) -> Optional[bytes]:
+    """Content with ignored parts removed — only used to decide whether something *really* changed."""
+    if data is None or not rules or is_binary(data):
+        return data
+    text, _fmt = detect_text(data)
+    kind = kind_for_path(path, text)
+    lines = text.split("\n")
+    line_rx = []
+    for r in rules:
+        if r["kind"] == "line":
+            try:
+                line_rx.append(re.compile(r["pattern"]))
+            except re.error:
+                pass
+    if kind == "ini":
+        keys = [r["pattern"] for r in rules if r["kind"] == "ini_key"]
+        secs = [r["pattern"].lower() for r in rules if r["kind"] == "ini_section"]
+        out, section = [], ""
+        for ln in lines:
+            st = ln.strip()
+            if st.startswith("[") and "]" in st:
+                section = st[1:st.index("]")].strip()
+                if any(fnmatch.fnmatch(section.lower(), p) for p in secs):
+                    continue
+                out.append(ln)
+                continue
+            if any(fnmatch.fnmatch(section.lower(), p) for p in secs):
+                continue
+            if "=" in st and not st.startswith((";", "#", "//")):
+                k = st.split("=", 1)[0].strip()
+                if any(_ini_key_match(section, k, pat) for pat in keys):
+                    continue
+            if any(rx.search(ln) for rx in line_rx):
+                continue
+            out.append(ln)
+        return "\n".join(out).encode("utf-8")
+    if kind == "xml":
+        paths = [r["pattern"] for r in rules if r["kind"] == "xml"]
+        if paths:
+            try:
+                root = ET.fromstring(re.sub(r"^\s*<\?xml[^>]*\?>", "", text).encode("utf-8"))
+                parent = {c: p for p in root.iter() for c in p}
+                for pth in paths:
+                    try:
+                        for el in root.findall(pth):
+                            if el in parent:
+                                parent[el].remove(el)
+                            else:
+                                el.clear()
+                    except SyntaxError:
+                        continue
+                text = ET.tostring(root, encoding="unicode")
+                lines = text.split("\n")
+            except ET.ParseError:
+                pass
+    return "\n".join(ln for ln in lines if not any(rx.search(ln) for rx in line_rx)).encode("utf-8")
+
+
+def _ini_key_match(section: str, key: str, pattern: str) -> bool:
+    if "/" in pattern:
+        ps, pk = pattern.split("/", 1)
+    else:
+        ps, pk = "*", pattern
+    return fnmatch.fnmatch(section.lower(), ps.strip().lower()) and fnmatch.fnmatch(key.lower(), pk.strip().lower())
+
+
+def setting_values(data: Optional[bytes], path: str) -> Optional[dict]:
+    """Flatten a config into {setting: value}. INI: 'Section/Key'. XML: 'Root/Child[2]/Name' (+ '@attr')."""
+    if data is None or is_binary(data):
+        return None
+    text, _ = detect_text(data)
+    kind = kind_for_path(path, text)
+    out: dict[str, str] = {}
+    if kind == "ini":
+        section = ""
+        for ln in text.split("\n"):
+            st = ln.strip()
+            if not st or st.startswith((";", "#", "//")):
+                continue
+            if st.startswith("[") and "]" in st:
+                section = st[1:st.index("]")].strip()
+                continue
+            if "=" in st:
+                k, v = st.split("=", 1)
+                out[f"{section}/{k.strip()}"] = v.strip()
+        return out
+    if kind == "xml":
+        try:
+            root = ET.fromstring(re.sub(r"^\s*<\?xml[^>]*\?>", "", text).encode("utf-8"))
+        except ET.ParseError:
+            return None
+
+        def walk(el, prefix):
+            counts: dict[str, int] = {}
+            totals: dict[str, int] = {}
+            for c in el:
+                totals[c.tag] = totals.get(c.tag, 0) + 1
+            for k, v in el.attrib.items():
+                out[f"{prefix}@{k}"] = v
+            txt = (el.text or "").strip()
+            if txt and len(el) == 0:
+                out[prefix] = txt
+            for c in el:
+                if not isinstance(c.tag, str):
+                    continue
+                counts[c.tag] = counts.get(c.tag, 0) + 1
+                name = c.tag + (f"[{counts[c.tag]}]" if totals[c.tag] > 1 else "")
+                walk(c, f"{prefix}/{name}")
+        walk(root, root.tag)
+        return out
+    return None
+
+
+def setting_changes(old: Optional[bytes], new: Optional[bytes], path: str) -> Optional[list[dict]]:
+    """Readable per-setting changes, or None if the file type has no settings structure."""
+    a, b = setting_values(old, path), setting_values(new, path)
+    if a is None and b is None:
+        return None
+    a, b = a or {}, b or {}
+    sample = new if new is not None else old
+    ftype = kind_for_path(path, detect_text(sample)[0] if sample else "")
+    out = []
+    for k in sorted(set(a) | set(b), key=lambda x: (x.split("/")[0], x)):
+        if a.get(k) != b.get(k):
+            kind = "added" if k not in a else ("removed" if k not in b else "changed")
+            out.append({"setting": k, "old": a.get(k), "new": b.get(k), "kind": kind, "ftype": ftype})
+    return out
+
+
+def describe_change(c: dict) -> str:
+    s = c["setting"]
+    if c.get("ftype", "ini") == "ini" and "/" in s:
+        sec, key = s.split("/", 1)
+        label = f"[{sec}] {key}" if sec else key
+    else:
+        label = s
+    if c["kind"] == "added":
+        return f"{label}: added = {c['new']}"
+    if c["kind"] == "removed":
+        return f"{label}: removed (was {c['old']})"
+    return f"{label}: {c['old']} → {c['new']}"
+
+
+# =========================================================================== rulebook (#6)
+
+def _rb_row(r) -> dict:
+    return dict(r)
+
+
+def rulebook(repo) -> list[dict]:
+    return [_rb_row(r) for r in repo.db.execute("SELECT * FROM rulebook ORDER BY file_id, selector")]
+
+
+def save_rulebook_entry(repo, entry: dict) -> dict:
+    if entry.get("id"):
+        repo.db.execute("UPDATE rulebook SET file_id=?, selector=?, required=?, note=?, author=? WHERE id=?",
+                        (entry.get("file_id"), entry["selector"], entry.get("required") or "", entry.get("note", ""),
+                         entry.get("author", ""), entry["id"]))
+    else:
+        cur = repo.db.execute("INSERT INTO rulebook(file_id, selector, required, note, author, created) "
+                              "VALUES(?,?,?,?,?,?)", (entry.get("file_id"), entry["selector"],
+                                                      entry.get("required") or "", entry.get("note", ""),
+                                                      entry.get("author", ""), now_ts()))
+        entry["id"] = cur.lastrowid
+    repo.db.commit()
+    f = repo.file(entry["file_id"]) if entry.get("file_id") else None
+    repo.log(f"Rulebook: {f.display + ' ' if f else ''}{entry['selector']}"
+             + (f" must be {entry['required']}" if entry.get("required") else " (note)"))
+    return entry
+
+
+def delete_rulebook_entry(repo, entry_id: int) -> None:
+    repo.db.execute("DELETE FROM rulebook WHERE id=?", (entry_id,))
+    repo.db.commit()
+
+
+def rule_value(data: Optional[bytes], path: str, selector: str) -> Optional[str]:
+    """Current value of one setting. INI: 'Section/Key' (case-insensitive). XML: ElementTree path (@attr)."""
+    if data is None:
+        return None
+    text, _ = detect_text(data)
+    kind = kind_for_path(path, text)
+    if kind == "ini":
+        sec, key = selector.split("/", 1) if "/" in selector else ("", selector)
+        return parse_ini(text).get((sec.strip().lower(), key.strip().lower()))
+    if kind == "xml":
+        vals = xml_values(data, selector)
+        if not vals:
+            return None
+        return vals[0] if len(vals) == 1 else ", ".join(str(v) for v in vals)
+    return None
+
+
+def rulebook_status(repo, overrides: Optional[dict] = None) -> list[dict]:
+    """Every rulebook entry with the live value and whether it complies. overrides: {file_id: bytes}."""
+    out = []
+    cache: dict[int, Optional[bytes]] = {}
+    for e in rulebook(repo):
+        f = repo.file(e["file_id"]) if e["file_id"] else None
+        cur = None
+        if f:
+            if overrides and f.id in overrides:
+                data = overrides[f.id]
+            else:
+                if f.id not in cache:
+                    cache[f.id] = repo.read_current(f)
+                data = cache[f.id]
+            cur = rule_value(data, f.path, e["selector"])
+        ok = None
+        if e["required"]:
+            ok = cur is not None and str(cur).strip() == e["required"].strip()
+        out.append(dict(e, file=f.display if f else "", label=(f"{f.display}: " if f else "") + e["selector"],
+                        current=cur, ok=ok))
+    return out
+
+
+def rulebook_violations_for(repo, f: TrackedFile, new_data: bytes) -> list[dict]:
+    """Rulebook requirements that new_data for file f would break."""
+    return [e for e in rulebook_status(repo, {f.id: new_data}) if e["file_id"] == f.id and e["ok"] is False]
+
+
+for _fn in (rulebook, save_rulebook_entry, delete_rulebook_entry, rulebook_status):
+    setattr(Repo, _fn.__name__, _fn)

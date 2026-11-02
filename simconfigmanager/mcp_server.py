@@ -18,7 +18,7 @@ import traceback
 from typing import Any, Optional
 
 from . import core
-from .core import APP_NAME, APP_VERSION, FolderSync, Repo, TrackedFile
+from .core import APP_NAME, APP_VERSION, Repo, TrackedFile
 
 SERVER_NAME = "sim-config-manager"
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -29,7 +29,9 @@ INSTRUCTIONS = (
     "other simulators' files via the sync folder. Start with `overview`. Use `read_file` to read a file "
     "(with line numbers), `search` to find settings across all files, `diff` to see what changed. "
     "To change a file use `propose_change`: the change is NOT applied until a person approves it in the "
-    "SimConfigManager app, so explain clearly why in `reason`. Prepar3D rewrites Prepar3D.cfg when it exits, "
+    "SimConfigManager app, so explain clearly why in `reason`. Check `rulebook` first: required values there are "
+    "locked and changes that break them are refused. System-information entries (GPU driver, Windows, software, "
+    "displays) are read-only. Prepar3D rewrites Prepar3D.cfg when it exits, "
     "so changes to it should be applied with the sim closed."
 )
 
@@ -73,13 +75,16 @@ def resolve_file(repo: Repo, ref: Any) -> TrackedFile:
     raise ToolError(f"No tracked file matches '{ref}'. Use list_files to see what is tracked.")
 
 
-def remote(repo: Repo) -> FolderSync:
-    folder = repo.get("sync_folder")
-    if not folder:
-        raise ToolError("No sync folder is set up in SimConfigManager, so other sims can't be read.")
-    s = FolderSync(repo, folder)
+def remote(repo: Repo):
+    try:
+        s = core.make_sync(repo)
+    except Exception as e:  # noqa: BLE001
+        raise ToolError(f"The sync location can't be opened: {e}")
+    if s is None:
+        raise ToolError("No sync location (folder or Google Drive) is set up in SimConfigManager, so other sims "
+                        "can't be read.")
     if not s.ok:
-        raise ToolError(f"The sync folder is not reachable right now: {folder}")
+        raise ToolError(f"The sync location is not reachable right now: {s.where}")
     return s
 
 
@@ -178,7 +183,11 @@ def t_overview(repo: Repo, a: dict) -> str:
     if alerts:
         out.append("Recent alerts:")
         out += [f"  {core.fmt_ts(e['ts'])}  {e['message']}" for e in alerts]
-    if repo.get("sync_folder"):
+    book = [b for b in repo.rulebook_status() if b["ok"] is False]
+    if book:
+        out.append("RULEBOOK VIOLATIONS: " + "; ".join(f"{b['label']} = {b['current']!r} (required "
+                                                       f"{b['required']!r})" for b in book))
+    if repo.get("sync_folder") or repo.get("sync_mode") == "gdrive":
         try:
             others = [m["machine"] for m in remote(repo).machines() if m["machine"] != repo.machine]
             if others:
@@ -271,7 +280,18 @@ def t_diff(repo: Repo, a: dict) -> str:
     old, lo = version_bytes(repo, f, frm)
     new, ln = version_bytes(repo, f, a.get("to") or "current")
     d = core.unified_diff(old, new, lo, ln)
-    return d if d.strip() else f"No differences between {lo} and {ln}."
+    if not d.strip():
+        return f"No differences between {lo} and {ln}."
+    return settings_summary(old, new, f.path) + d
+
+
+def settings_summary(old, new, path) -> str:
+    sc = core.setting_changes(old, new, path)
+    if not sc:
+        return ""
+    lines = [core.describe_change(c) for c in sc[:60]]
+    more = f"\n  … and {len(sc) - 60} more" if len(sc) > 60 else ""
+    return "Setting changes:\n  " + "\n  ".join(lines) + more + "\n\nLine diff:\n"
 
 
 def t_file_history(repo: Repo, a: dict) -> str:
@@ -335,8 +355,10 @@ def t_list_other_sims(repo: Repo, a: dict) -> str:
 def t_compare_with_other_sim(repo: Repo, a: dict) -> str:
     f = resolve_file(repo, a["file"])
     info, theirs = remote_file(repo, a["machine"], a.get("other_file") or f.display)
-    d = core.unified_diff(theirs, repo.read_current(f), f"{a['machine']}: {info['path']}",
-                          f"{repo.machine}: {f.path}")
+    mine = repo.read_current(f)
+    d = core.unified_diff(theirs, mine, f"{a['machine']}: {info['path']}", f"{repo.machine}: {f.path}")
+    if d.strip():
+        return settings_summary(theirs, mine, f.path) + d
     return d if d.strip() else f"{f.display} is identical on {repo.machine} and {a['machine']}."
 
 
@@ -345,6 +367,8 @@ def t_propose_change(repo: Repo, a: dict) -> str:
         raise ToolError("Proposing changes is switched off in SimConfigManager → Settings. Describe the change "
                         "to the user instead so they can make it in the editor.")
     f = resolve_file(repo, a["file"])
+    if core.is_probe(f):
+        raise ToolError(f"{f.display} is system information read from the PC; it can't be edited.")
     reason = (a.get("reason") or "").strip()
     if not reason:
         raise ToolError("Please give a reason — it is shown to the person who approves the change.")
@@ -382,6 +406,12 @@ def t_propose_change(repo: Repo, a: dict) -> str:
         new_data = core.encode_text(new_text, fmt)
     except ValueError as e:
         raise ToolError(str(e))
+    viol = core.rulebook_violations_for(repo, f, new_data)
+    if viol:
+        raise ToolError("Not proposed: this would break the rulebook — " + "; ".join(
+            f"{v['selector']} must be {v['required']!r} (would be {v['current']!r})"
+            + (f" — {v['note']}" if v.get("note") else "") for v in viol)
+            + ". If the rule itself should change, ask the user to update the rulebook in the app first.")
     try:
         prop = core.create_proposal(repo, f, new_data, reason, author=ctx_author())
     except OSError as e:
@@ -391,6 +421,19 @@ def t_propose_change(repo: Repo, a: dict) -> str:
     warn = "\nNote: " + "; ".join(p[1] for p in probs[:3]) if probs else ""
     return (f"Proposal {prop['id']} created for {f.display}. It has NOT been applied: the user must click Apply "
             f"in SimConfigManager (a notification is shown). Tell the user it is waiting for them.{warn}\n\n{diff}")
+
+
+def t_rulebook(repo: Repo, a: dict) -> str:
+    rows = repo.rulebook_status()
+    if not rows:
+        return "The rulebook is empty (no documented or locked settings yet)."
+    out = ["Rulebook — documented settings. 'required' values are locked: do not propose changes to them.\n"]
+    for r in rows:
+        state = {True: "OK", False: "VIOLATED", None: "note"}[r["ok"]]
+        req = f" required={r['required']!r}" if r["required"] else ""
+        out.append(f"[{state}] {r['label']}{req} current={r['current']!r}" + (f"\n      {r['note']}" if r["note"]
+                                                                            else ""))
+    return "\n".join(out)
 
 
 def t_list_proposals(repo: Repo, a: dict) -> str:
@@ -454,9 +497,63 @@ TOOLS = {
                         "new_content": {"type": "string", "description": "Whole new file content (only if a "
                                                                          "rewrite is really needed)"}},
                        ["file", "reason"]),
+    "rulebook": (t_rulebook, "The settings rulebook: documented settings with notes, and LOCKED required values "
+                             "(with live compliance). Check it before suggesting changes.", {}, []),
     "list_proposals": (t_list_proposals, "Proposed changes and whether they were applied or rejected.", {}, []),
 }
 READ_ONLY = {k for k in TOOLS if k != "propose_change"}
+
+
+PROMPTS = {
+    "troubleshoot": ("Troubleshoot a problem on a sim",
+                     [("symptom", "What happens, e.g. 'stutters on approach' or 'ProSim MCP not connecting'", True),
+                      ("sim", "Which sim, if not this PC", False)],
+                     "Troubleshoot this flight-sim problem: {symptom}{sim_part}. Start with `overview` and `rulebook`. "
+                     "Check what changed recently (`recent_events`, `diff` against the current version), relevant "
+                     "settings (`search`), system info (GPU driver, Windows, software versions) and, if another sim "
+                     "works fine, `compare_with_other_sim`. Explain the likely causes ranked by probability, with "
+                     "evidence (file + setting + value). Only then propose a fix with `propose_change` if a config "
+                     "change is needed, and say what to check after applying it."),
+    "pre_session_review": ("Pre-session / pre-checkride review", [],
+                           "Do a pre-session readiness review of this sim. Use `overview`, `version_status`, "
+                           "`rulebook` and `recent_events`. Report: does everything match the current certified "
+                           "version, any rulebook violations, alerts in the last 24 h, and anything unusual in system "
+                           "info. End with a clear GO / NO-GO and the reasons. Don't change anything."),
+    "explain_changes": ("Explain what changed since a version",
+                        [("version", "e.g. v3 (default: the current version)", False)],
+                        "Explain in plain language everything that changed since {version_or_current}: per file, "
+                        "which settings changed, what they do, and whether any change could affect training "
+                        "realism, performance or certification. Use `version_status`, `diff` and `file_history`."),
+    "compare_sims": ("Compare this sim with another", [("other_sim", "Name of the other sim, e.g. Sim 2", True)],
+                     "Compare the configuration of this sim with {other_sim}. Use `list_other_sims`, "
+                     "`compare_with_other_sim` for each relevant file, and system info. Group the differences into "
+                     "'intended' (e.g. hardware-specific) and 'probably unintended', and suggest how to align them."),
+    "tune_settings": ("Help dial in settings for a goal", [("goal", "e.g. 'smooth 60 fps on 3 projectors'", True)],
+                      "Help tune this sim's settings for: {goal}. Read the current Prepar3D.cfg and relevant files, "
+                      "the system info (GPU, CPU, displays) and the rulebook (locked values must stay). Suggest "
+                      "concrete changes one step at a time with the expected effect, and propose them with "
+                      "`propose_change` so they can be approved and rolled back."),
+}
+
+
+def prompt_list() -> list[dict]:
+    return [{"name": n, "title": t, "description": t,
+             "arguments": [{"name": an, "description": ad, "required": req} for an, ad, req in args]}
+            for n, (t, args, _tpl) in PROMPTS.items()]
+
+
+def prompt_get(name: str, args: dict) -> dict:
+    if name not in PROMPTS:
+        raise ToolError(f"Unknown prompt {name}")
+    title, spec, tpl = PROMPTS[name]
+    vals = {an: (args.get(an) or "").strip() for an, _d, _r in spec}
+    for an, _d, req in spec:
+        if req and not vals[an]:
+            raise ToolError(f"Missing argument: {an}")
+    vals["sim_part"] = f" (on {vals['sim']})" if vals.get("sim") else ""
+    vals["version_or_current"] = vals.get("version") or "the current configuration version"
+    return {"description": title, "messages": [{"role": "user", "content": {"type": "text",
+                                                                            "text": tpl.format(**vals)}}]}
 
 
 def tool_list() -> list[dict]:
@@ -495,7 +592,7 @@ class Server:
             if method == "initialize":
                 want = params.get("protocolVersion")
                 result = {"protocolVersion": want if want in SUPPORTED_PROTOCOLS else SUPPORTED_PROTOCOLS[0],
-                          "capabilities": {"tools": {"listChanged": False}},
+                          "capabilities": {"tools": {"listChanged": False}, "prompts": {"listChanged": False}},
                           "serverInfo": {"name": SERVER_NAME, "title": "Sim Config Manager",
                                          "version": APP_VERSION},
                           "instructions": INSTRUCTIONS}
@@ -518,8 +615,15 @@ class Server:
                     result = {"content": [{"type": "text", "text": f"Internal error: {e}\n"
                                                                     f"{traceback.format_exc(limit=3)}"}],
                               "isError": True}
-            elif method in ("resources/list", "prompts/list"):
-                result = {method.split("/")[0]: []}
+            elif method == "prompts/list":
+                result = {"prompts": prompt_list()}
+            elif method == "prompts/get":
+                try:
+                    result = prompt_get(params.get("name"), params.get("arguments") or {})
+                except ToolError as e:
+                    return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": str(e)}}
+            elif method == "resources/list":
+                result = {"resources": []}
             else:
                 return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": f"Unknown method {method}"}}
         except Exception as e:  # noqa: BLE001
