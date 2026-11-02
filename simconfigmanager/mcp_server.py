@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 import traceback
 from typing import Any, Optional
 
@@ -35,6 +36,18 @@ INSTRUCTIONS = (
 
 class ToolError(Exception):
     pass
+
+
+# who is calling (set per request): local Claude Desktop, or a named access key over the network
+CTX = threading.local()
+
+
+def ctx_author() -> str:
+    return getattr(CTX, "author", "Claude")
+
+
+def ctx_may_propose() -> bool:
+    return getattr(CTX, "may_propose", True)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -328,7 +341,7 @@ def t_compare_with_other_sim(repo: Repo, a: dict) -> str:
 
 
 def t_propose_change(repo: Repo, a: dict) -> str:
-    if repo.get("claude_proposals") == "0":
+    if repo.get("claude_proposals") == "0" or not ctx_may_propose():
         raise ToolError("Proposing changes is switched off in SimConfigManager → Settings. Describe the change "
                         "to the user instead so they can make it in the editor.")
     f = resolve_file(repo, a["file"])
@@ -370,7 +383,7 @@ def t_propose_change(repo: Repo, a: dict) -> str:
     except ValueError as e:
         raise ToolError(str(e))
     try:
-        prop = core.create_proposal(repo, f, new_data, reason)
+        prop = core.create_proposal(repo, f, new_data, reason, author=ctx_author())
     except OSError as e:
         raise ToolError(f"Could not save the proposal ({e}). Start SimConfigManager once as administrator so it "
                         f"can set up its proposals folder, then try again.")
@@ -458,8 +471,10 @@ def tool_list() -> list[dict]:
 # --------------------------------------------------------------------------- JSON-RPC over stdio
 
 class Server:
-    def __init__(self, data_dir: Optional[str] = None):
+    def __init__(self, data_dir: Optional[str] = None, author: str = "Claude", may_propose: bool = True):
         self.data_dir = data_dir
+        self.author = author
+        self.may_propose = may_propose
         self._repo: Optional[Repo] = None
 
     def repo(self) -> Repo:
@@ -493,6 +508,7 @@ class Server:
                 if name not in TOOLS:
                     return {"jsonrpc": "2.0", "id": mid,
                             "error": {"code": -32602, "message": f"Unknown tool: {name}"}}
+                CTX.author, CTX.may_propose = self.author, self.may_propose
                 try:
                     text = TOOLS[name][0](self.repo(), params.get("arguments") or {})
                     result = {"content": [{"type": "text", "text": text}], "isError": False}
@@ -532,11 +548,18 @@ def main(argv=None):
     import argparse
     ap = argparse.ArgumentParser(description="SimConfigManager connector for Claude (MCP over stdio)")
     ap.add_argument("--data", default=None, help="data folder (default: the app's data folder)")
+    ap.add_argument("--remote", default=None, metavar="URL",
+                    help="relay to a sim PC on the network, e.g. http://192.168.1.20:8765/mcp")
+    ap.add_argument("--key", default=None, help="access key for --remote (from the sim PC's Claude tab)")
     args = ap.parse_args(argv)
     # Nothing but protocol messages may go to stdout.
     real_out = sys.stdout.buffer
     sys.stdout = sys.stderr
-    Server(args.data).serve(sys.stdin.buffer, real_out)
+    if args.remote:
+        from .net import relay
+        relay(args.remote, args.key or "", sys.stdin.buffer, real_out)
+    else:
+        Server(args.data).serve(sys.stdin.buffer, real_out)
 
 
 if __name__ == "__main__":

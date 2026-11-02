@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QColorDialog, QScrollArea,
 )
 
-from . import core
+from . import core, net
 from .core import (APP_NAME, APP_VERSION, FolderSync, Repo, Rule, RULE_HELP, RULE_KINDS, fmt_ts,
                    unified_diff)
 
@@ -426,6 +426,81 @@ class CreateVersionDialog(QDialog):
         return self.title.text().strip(), self.notes.toPlainText().strip(), self.by.text().strip()
 
 
+class NetSetupDialog(QDialog):
+    """Shows the Claude Desktop config for a laptop, ready to copy."""
+
+    def __init__(self, sim_name: str, key: dict, urls: list[str], kind: str, parent=None):
+        super().__init__(parent)
+        self.sim_name, self.key, self.kind = sim_name, key, kind
+        self.setWindowTitle(f"Setup for {key['name']} ({'Mac' if kind == 'mac' else 'Windows laptop'})")
+        self.resize(820, 600)
+        lay = QVBoxLayout(self)
+        if kind == "mac":
+            steps = ("<ol><li>On the Mac, install <b>Claude Desktop</b> (claude.ai/download) and sign in.</li>"
+                     "<li>Claude menu → <b>Settings… → Developer → Edit Config</b>. This opens "
+                     "<i>claude_desktop_config.json</i> in Finder — open it with TextEdit.</li>"
+                     "<li>Replace its contents with the text below (if it already has <i>mcpServers</i>, add just "
+                     "the inner entry). Save.</li>"
+                     "<li>Quit Claude Desktop (⌘Q) and open it again. In a chat, the tools menu now shows "
+                     f"<b>{html.escape(net.server_key_name(sim_name))}</b>.</li></ol>"
+                     "Nothing needs to be installed on the Mac — it uses the built-in <i>bash</i> and <i>curl</i>.")
+        else:
+            steps = ("<ol><li>Copy <b>SimConfigManager-MCP.exe</b> to the laptop, e.g. "
+                     "<i>C:\\SimConfigManager\\</i> (adjust the path below if you put it elsewhere).</li>"
+                     "<li>Install <b>Claude Desktop</b>, then Settings → Developer → Edit Config, paste the text "
+                     "below into <i>claude_desktop_config.json</i>, save, and restart Claude Desktop.</li></ol>")
+        lab = QLabel(steps)
+        lab.setWordWrap(True)
+        lab.setTextFormat(Qt.RichText)
+        lay.addWidget(lab)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Address of this sim PC:"))
+        self.url = QComboBox()
+        self.url.setEditable(True)
+        self.url.addItems(urls)
+        self.url.currentTextChanged.connect(self.update_text)
+        row.addWidget(self.url, 1)
+        lay.addLayout(row)
+        self.text = QTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setFont(QFont("Consolas", 9))
+        lay.addWidget(self.text, 1)
+        warn = QLabel("⚠ This contains the access key for <b>" + html.escape(key["name"]) + "</b>. Send it "
+                      "privately (e.g. AirDrop or a direct message), not in a group chat. Remove the person in the "
+                      "Claude tab to revoke it.")
+        warn.setWordWrap(True)
+        warn.setTextFormat(Qt.RichText)
+        warn.setStyleSheet("background:#fff3cd; color:#664d03; padding:6px")
+        lay.addWidget(warn)
+        row = QHBoxLayout()
+        b = QPushButton("Copy to clipboard")
+        b.clicked.connect(lambda: QApplication.clipboard().setText(self.text.toPlainText()))
+        row.addWidget(b)
+        b = QPushButton("Save as file…")
+        b.clicked.connect(self.save_file)
+        row.addWidget(b)
+        row.addStretch()
+        b = QPushButton("Close")
+        b.clicked.connect(self.accept)
+        row.addWidget(b)
+        lay.addLayout(row)
+        self.update_text()
+
+    def config(self) -> dict:
+        url = self.url.currentText().strip()
+        if self.kind == "mac":
+            return net.mac_config(self.sim_name, url, self.key["key"])
+        return net.windows_config(self.sim_name, url, self.key["key"])
+
+    def update_text(self, *_):
+        self.text.setPlainText(json.dumps(self.config(), indent=2))
+
+    def save_file(self):
+        p, _ = QFileDialog.getSaveFileName(self, "Save", "claude_desktop_config.json", "JSON (*.json)")
+        if p:
+            Path(p).write_text(json.dumps(self.config(), indent=2), encoding="utf-8")
+
+
 class ProposalDialog(QDialog):
     """Review a change Claude proposed: reason, diff, Apply / Reject."""
 
@@ -439,7 +514,8 @@ class ProposalDialog(QDialog):
         cur = core.read_file_bytes(f.path) if f else None
         new = core.proposal_data(prop)
         head = QLabel(f"<b>{html.escape(prop['label'])}</b> — {html.escape(prop['path'])}<br>"
-                      f"Proposed {fmt_ts(prop['created'])} · status: <b>{prop['status']}</b>")
+                      f"Proposed {fmt_ts(prop['created'])} by <b>{html.escape(prop.get('author', 'Claude'))}</b>"
+                      f" · status: <b>{prop['status']}</b>")
         head.setTextFormat(Qt.RichText)
         lay.addWidget(head)
         reason = QLabel("<b>Claude's reason:</b><br>" + html.escape(prop["reason"]).replace("\n", "<br>"))
@@ -620,6 +696,7 @@ class MainWindow(QMainWindow):
                 return
         if self.sync_dirty:
             self.auto_push()
+        self.stop_network()
         self.tray.hide()
         QApplication.quit()
 
@@ -638,6 +715,8 @@ class MainWindow(QMainWindow):
 
     def tick(self):
         self.check_proposals()
+        if getattr(self, "_net_activity", None):
+            self.drain_net_activity()
         if self.paused:
             return
         try:
@@ -1980,6 +2059,46 @@ class MainWindow(QMainWindow):
         self.claude_allow.toggled.connect(lambda v: self.repo.set("claude_proposals", "1" if v else "0"))
         lay.addWidget(self.claude_allow)
 
+        # ---- network access (Claude Desktop on mechanics' laptops)
+        nbox = QGroupBox("Network access — Claude on other computers on this network (e.g. MacBooks)")
+        nl = QVBoxLayout(nbox)
+        row = QHBoxLayout()
+        self.net_enable = QCheckBox("Allow connections from the local network")
+        self.net_enable.setChecked(self.repo.get("net_enabled") == "1")
+        self.net_enable.toggled.connect(self.toggle_network)
+        row.addWidget(self.net_enable)
+        row.addWidget(QLabel("Port:"))
+        self.net_port = QSpinBox()
+        self.net_port.setRange(1024, 65535)
+        self.net_port.setValue(int(self.repo.get("net_port") or net.DEFAULT_PORT))
+        self.net_port.editingFinished.connect(self.change_net_port)
+        row.addWidget(self.net_port)
+        row.addStretch()
+        nl.addLayout(row)
+        self.net_status = QLabel()
+        self.net_status.setTextFormat(Qt.RichText)
+        self.net_status.setWordWrap(True)
+        self.net_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        nl.addWidget(self.net_status)
+        self.key_table = QTableWidget()
+        setup_table(self.key_table, ["Person / computer", "May propose changes", "Key created", "Last connected"], 0)
+        self.key_table.setMaximumHeight(140)
+        nl.addWidget(self.key_table)
+        row = QHBoxLayout()
+        for text, fn in (("Add person…", self.add_net_key), ("Remove access", self.remove_net_key),
+                         ("Setup for a Mac…", lambda: self.show_net_setup("mac")),
+                         ("Setup for a Windows laptop…", lambda: self.show_net_setup("windows"))):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        row.addStretch()
+        nl.addLayout(row)
+        lay.addWidget(nbox)
+        self.net_server = None
+        self._net_activity = []
+        if self.net_enable.isChecked():
+            QTimer.singleShot(500, lambda: self.start_network(quiet=True))
+
         row = QHBoxLayout()
         row.addWidget(QLabel("<b>Changes proposed by Claude</b>"))
         row.addStretch()
@@ -1989,14 +2108,146 @@ class MainWindow(QMainWindow):
             row.addWidget(b)
         lay.addLayout(row)
         self.prop_table = QTableWidget()
-        setup_table(self.prop_table, ["Status", "When", "File", "Reason"], 3)
+        setup_table(self.prop_table, ["Status", "When", "From", "File", "Reason"], 4)
         self.prop_table.doubleClicked.connect(lambda _i: self.review_selected_proposal())
         lay.addWidget(self.prop_table, 1)
         self._seen_proposals = {p["id"] for p in core.list_proposals(self.repo, "pending")}
         QTimer.singleShot(1500, lambda: self.check_proposals(startup=True))
         return w
 
+    # ---------------- network access
+    def start_network(self, quiet: bool = False) -> bool:
+        self.stop_network()
+        port = self.net_port.value()
+        srv = net.NetworkServer(self.repo.data_dir, port=port, on_activity=self._net_activity.append)
+        srv.keys = net.load_keys(self.repo)
+        try:
+            srv.start()
+        except OSError as e:
+            if not quiet:
+                QMessageBox.warning(self, APP_NAME, f"Could not open port {port}: {e}\nIs another program using it? "
+                                    "Pick another port.")
+            self.net_status.setText(f"<span style='color:#c62828'>Could not open port {port}: "
+                                    f"{html.escape(str(e))}</span>")
+            return False
+        self.net_server = srv
+        ok, msg = net.set_firewall_rule(port, True)
+        if not ok and not quiet:
+            QMessageBox.warning(self, APP_NAME, "The Windows Firewall rule could not be added (run the app as "
+                                f"administrator), so other computers may be blocked:\n{msg}")
+        self.repo.log(f"Network access for Claude switched on (port {port})")
+        self.refresh_network()
+        return True
+
+    def stop_network(self):
+        if self.net_server:
+            self.net_server.stop()
+            self.net_server = None
+
+    def toggle_network(self, on: bool):
+        self.repo.set("net_enabled", "1" if on else "0")
+        if on:
+            if not net.load_keys(self.repo):
+                QMessageBox.information(self, APP_NAME, "Network access is on. Now click 'Add person…' to create an "
+                                        "access key for each mechanic's laptop.")
+            if not self.start_network():
+                self.net_enable.setChecked(False)
+        else:
+            self.stop_network()
+            net.set_firewall_rule(self.net_port.value(), False)
+            self.repo.log("Network access for Claude switched off")
+        self.refresh_network()
+
+    def change_net_port(self):
+        old = int(self.repo.get("net_port") or net.DEFAULT_PORT)
+        new = self.net_port.value()
+        if new == old:
+            return
+        self.repo.set("net_port", new)
+        if self.net_server:
+            net.set_firewall_rule(old, False)
+            self.start_network()
+            QMessageBox.information(self, APP_NAME, "Port changed — laptops need the new setup (Setup for a Mac…).")
+
+    def net_urls(self) -> list[str]:
+        port = self.net_port.value()
+        hosts = net.lan_addresses() + [f"{net.hostname().lower()}.local"]
+        return [f"http://{h}:{port}/mcp" for h in hosts]
+
+    def refresh_network(self):
+        keys = net.load_keys(self.repo)
+        seen = self.net_server.last_seen if self.net_server else {}
+        if self.net_server:
+            self.net_server.keys = keys
+            urls = self.net_urls()
+            self.net_status.setText(
+                "<span style='color:#2e7d32'><b>✔ Listening.</b></span> Laptops connect to "
+                + " or ".join(f"<b>{html.escape(u)}</b>" for u in urls[:2])
+                + ". Only computers on this local network are let through the firewall, and each needs its own key. "
+                  "Tip: give this PC a fixed IP address (DHCP reservation in the router) so the setup keeps working.")
+        elif self.net_enable.isChecked():
+            pass
+        else:
+            self.net_status.setText("Off. Switch on to let Claude Desktop on a mechanic's laptop read this sim's "
+                                    "configs (and propose changes you approve here).")
+        self.key_table.setRowCount(len(keys))
+        for r, k in enumerate(keys):
+            ls = seen.get(k["name"])
+            self.key_table.setItem(r, 0, item(k["name"], k["key"], bold=True))
+            self.key_table.setItem(r, 1, item("yes" if k.get("may_propose", True) else "read-only"))
+            self.key_table.setItem(r, 2, item(fmt_ts(k["created"])))
+            self.key_table.setItem(r, 3, item(f"{fmt_ts(ls[0])} from {ls[1]}" if ls else "–"))
+
+    def add_net_key(self):
+        name, ok = QInputDialog.getText(self, "Add person", "Name of the person or laptop (e.g. 'Jan – MacBook Pro'):")
+        if not ok or not name.strip():
+            return
+        if any(k["name"].lower() == name.strip().lower() for k in net.load_keys(self.repo)):
+            QMessageBox.warning(self, APP_NAME, "That name already has a key.")
+            return
+        may = QMessageBox.question(self, APP_NAME, f"May Claude on {name}'s computer PROPOSE changes?\n"
+                                   "(You still approve every change on this PC. 'No' = read-only.)") == QMessageBox.Yes
+        k = net.add_key(self.repo, name, may)
+        self.repo.log(f"Network access key created for {k['name']}" + ("" if may else " (read-only)"))
+        self.refresh_network()
+        for r in range(self.key_table.rowCount()):
+            if self.key_table.item(r, 0).text() == k["name"]:
+                self.key_table.selectRow(r)
+        if not self.net_enable.isChecked():
+            self.net_enable.setChecked(True)
+        self.show_net_setup("mac")
+
+    def remove_net_key(self):
+        ids = selected_data(self.key_table)
+        if not ids:
+            return
+        keys = net.load_keys(self.repo)
+        k = next(k for k in keys if k["key"] == ids[0])
+        if QMessageBox.question(self, APP_NAME, f"Remove access for {k['name']}? Their Claude can no longer "
+                                "connect.") == QMessageBox.Yes:
+            net.save_keys(self.repo, [x for x in keys if x["key"] != k["key"]])
+            self.repo.log(f"Network access removed for {k['name']}")
+            self.refresh_network()
+
+    def show_net_setup(self, kind: str):
+        keys = net.load_keys(self.repo)
+        if not keys:
+            QMessageBox.information(self, APP_NAME, "First click 'Add person…' to create a key.")
+            return
+        ids = selected_data(self.key_table)
+        key = next((k for k in keys if ids and k["key"] == ids[0]), keys[-1])
+        dlg = NetSetupDialog(self.repo.machine, key, self.net_urls(), kind, self)
+        dlg.exec()
+
+    def drain_net_activity(self):
+        acts, self._net_activity[:] = list(self._net_activity), []
+        for a in acts:
+            self.repo.log(a)
+        if acts and self.tabs.currentWidget() is self.tab_claude and self.isVisible():
+            self.refresh_network()
+
     def refresh_claude(self):
+        self.refresh_network()
         connected = core.claude_desktop_connected()
         if connected:
             self.claude_status.setText("<span style='color:#2e7d32'><b>✔ Connected to Claude Desktop.</b></span> "
@@ -2014,8 +2265,9 @@ class MainWindow(QMainWindow):
             self.prop_table.setItem(r, 0, item(p["status"], p["id"], colors.get(p["status"]),
                                                bold=p["status"] == "pending"))
             self.prop_table.setItem(r, 1, item(fmt_ts(p["created"])))
-            self.prop_table.setItem(r, 2, item(p["label"]))
-            self.prop_table.setItem(r, 3, item(p["reason"].replace("\n", " ")[:200]))
+            self.prop_table.setItem(r, 2, item(p.get("author", "Claude")))
+            self.prop_table.setItem(r, 3, item(p["label"]))
+            self.prop_table.setItem(r, 4, item(p["reason"].replace("\n", " ")[:200]))
 
     def toggle_claude_connection(self):
         enable = not core.claude_desktop_connected()
@@ -2062,7 +2314,7 @@ class MainWindow(QMainWindow):
             new = pend
         if new:
             p = new[-1]
-            self.tray.showMessage(f"Claude proposes a change to {p['label']}",
+            self.tray.showMessage(f"{p.get('author', 'Claude')} proposes a change to {p['label']}",
                                   p["reason"][:180] + "\n\nOpen Sim Config Manager → Claude to review.",
                                   QSystemTrayIcon.Information, 15000)
             if self.tabs.currentWidget() is self.tab_claude and self.isVisible():

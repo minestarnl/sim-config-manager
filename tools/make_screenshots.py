@@ -248,4 +248,10 @@ shot(w, "claude.png")
 pd = gui.ProposalDialog(repo, core.list_proposals(repo, "pending")[0], w)
 pd.resize(980, 600)
 shot(pd, "claude-proposal.png")
+
+# 9. network setup for a mechanic's MacBook (example key, example addresses)
+demo_key = {"name": "Jan – MacBook Pro", "key": "scm_EXAMPLE-not-a-real-key-0000", "created": 0, "may_propose": True}
+nd = gui.NetSetupDialog("Sim 1", demo_key, ["http://192.168.10.11:8765/mcp", "http://sim1.local:8765/mcp"], "mac", w)
+nd.resize(820, 600)
+shot(nd, "claude-network.png")
 print("done →", OUT)

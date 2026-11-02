@@ -67,6 +67,7 @@ publishes `v<version>` automatically (existing releases are never overwritten).
 | **Certification archive**: all monitored files in one zip + REPORT.txt + checksums | Files → Export archive, tray |
 | **Import archive** on this or another PC (paths translated, checksums verified) | Files → Import archive |
 | **Claude connector**: Claude reads configs, history, versions and other sims; proposes changes you approve | Claude |
+| **Claude from mechanics' MacBooks** over the LAN, with a personal access key per person | Claude → Network access |
 | Runs in the tray, starts with Windows, single instance | Settings |
 
 ### Alert rule types
@@ -127,6 +128,30 @@ The connector never writes config files itself and runs without admin rights. Tu
 Claude tab if you want read-only. **Copy files for Claude** (Claude tab, or right-click files) copies selected
 files as text you can paste into any Claude chat — handy on your phone or claude.ai.
 
+### From a MacBook (or any laptop) on the network
+
+Mechanics can use Claude Desktop on their own laptop and talk to a sim PC over the local network:
+
+1. On the sim PC: **Claude** tab → **Network access** → **Add person…** (e.g. "Jan – MacBook Pro"). This
+   switches network access on, adds a Windows Firewall rule that only lets in computers on the local network,
+   and creates a personal access key. Choose whether that person's Claude may propose changes or only read.
+2. **Setup for a Mac…** shows a ready-made Claude Desktop config. Send it to the mechanic privately
+   (AirDrop / direct message).
+3. On the Mac: Claude Desktop → Settings → Developer → **Edit Config**, paste, save, restart Claude Desktop.
+   Nothing to install — the relay uses the Mac's built-in `bash` and `curl`.
+
+![Setup for a Mac](docs/screenshots/claude-network.png)
+
+* Add one entry per sim (the config names them `sim-1`, `sim-2`, …) — or use one, since each sim can
+  also read the other sims' files through the sync folder.
+* Every person has their own key; **Remove access** revokes it. The Claude tab shows who connected last and
+  from where, connections are logged, and proposals show who they came from ("Claude via Jan – MacBook Pro").
+* Changes are still only *proposed* — they are applied on the sim PC after someone clicks Apply.
+* Give the sim PCs a fixed address (DHCP reservation in the router), or use `<pc-name>.local`.
+* Windows laptops: **Setup for a Windows laptop…** (uses `SimConfigManager-MCP.exe --remote <url> --key <key>`).
+* The connection is plain HTTP inside your LAN with a secret key per person. Don't forward the port on the
+  router / expose it to the internet.
+
 The connector is a standard MCP server (stdio), so other MCP clients work too:
 `SimConfigManager-MCP.exe [--data <data folder>]`.
 
@@ -175,7 +200,8 @@ python SimConfigManager.pyw --no-elevate --data .\testdata  # run with a throw-a
 ```
 
 `simconfigmanager/core.py` — storage, snapshots, versions, rules, sync, archives ·
-`gui.py` — main window · `editor.py` — built-in editor · `mcp_server.py` — Claude connector.
+`gui.py` — main window · `editor.py` — built-in editor · `mcp_server.py` — Claude connector ·
+`net.py` — network access (HTTP endpoint, relays, access keys).
 Regenerate the README screenshots with `QT_QPA_PLATFORM=offscreen python tools/make_screenshots.py`.
 
 ## Upgrading from SimConfigKeeper (≤ 1.3)
