@@ -1,6 +1,5 @@
 """End-to-end test of the Claude connector: spawn it and speak MCP over stdio like Claude Desktop does."""
 import json
-import os
 import subprocess
 import sys
 import tempfile

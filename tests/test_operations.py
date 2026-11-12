@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from simconfigmanager import core, mcp_server, remote  # noqa: E402
-from simconfigmanager.core import FolderSync, Repo, winsys  # noqa: E402
+from simconfigmanager.core import Repo, winsys  # noqa: E402
 
 
 def make_repo(tmp: Path, name: str = "Sim 1") -> tuple:

@@ -208,7 +208,7 @@ def test_versions():
     os.remove(b)
     assert {m.file.display: m.status for m in repo.mismatches()}["b.xml"] == "missing"
     # archive mentions version
-    res = core.export_archive(repo, str(tmp / "x.zip"))
+    core.export_archive(repo, str(tmp / "x.zip"))
     import zipfile
     rep_txt = zipfile.ZipFile(tmp / "x.zip").read("REPORT.txt").decode()
     assert "v2 – Second" in rep_txt and "DIFFER" in rep_txt, rep_txt[:800]

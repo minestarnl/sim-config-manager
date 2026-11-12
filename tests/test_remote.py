@@ -68,7 +68,7 @@ def test_remote_app():
         # archive: built on the sim, saved on this computer; import back through the sim
         z = tmp / "client" / "arc.zip"
         z.parent.mkdir()
-        res = core.export_archive(rr, str(z), note="remote export")
+        core.export_archive(rr, str(z), note="remote export")
         assert z.exists() and (tmp / "client" / "arc.zip.sha256").exists()
         arc = core.Archive(str(z))
         assert arc.verify()["zip_check"] == "matches"

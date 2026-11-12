@@ -17,13 +17,13 @@ sys.path.insert(0, str(ROOT))
 OUT = Path(os.environ.get("SCM_SHOTS_OUT") or ROOT / "docs" / "screenshots")
 OUT.mkdir(parents=True, exist_ok=True)
 
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox, QTableWidget  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QTableWidget  # noqa: E402
 
 app = QApplication(sys.argv)
 from simconfigmanager import theme  # noqa: E402
 theme.init(app, os.environ.get("SCM_THEME", "dark"))
-from simconfigmanager import core, editor, gui  # noqa: E402
-from simconfigmanager.ui import connect as gui_connect, dialogs as gui_dialogs  # noqa: E402,F401
+from simconfigmanager import core, gui  # noqa: E402
+from simconfigmanager.ui import connect as gui_connect  # noqa: E402
 from simconfigmanager.core import Repo, Rule  # noqa: E402
 
 os.environ["USERNAME"] = "Sim Tech"
