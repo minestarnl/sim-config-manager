@@ -33,7 +33,7 @@ def recommended(group: str, path: str) -> bool:
     """Pre-tick the files people almost always want; the rest is listed but left unticked."""
     name = re.split(r"[\\/]", path)[-1].lower()       # Windows paths, also in the remote app on a Mac
     if group == "ProSim":
-        return name == "config.xml"
+        return name in ("config.xml", "cockpitsetup.xml")
     if group.endswith("add-ons"):
         return False
     return name in ("prepar3d.cfg", "dll.xml", "exe.xml", "add-ons.cfg", "cameras.cfg", "scenery.cfg",

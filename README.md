@@ -90,7 +90,8 @@ The first time the app opens on a sim, a short setup guides you through it (run 
 
 1. **Name** this sim (`Sim 1`, `Sim 2` …) and yourself.
 2. **Config files** — Prepar3D, FSUIPC and ProSim files are found automatically; the usual ones (Prepar3D.cfg,
-   dll.xml, exe.xml, add-ons.cfg, Cameras.cfg, scenery.cfg, Controls, FSUIPC ini, ProSim config.xml) are ticked.
+   dll.xml, exe.xml, add-ons.cfg, Cameras.cfg, scenery.cfg, Controls, FSUIPC ini, ProSim config.xml and the ProSim
+   System's cockpitsetup.xml) are ticked.
    Untick what you don't need or add other files. Optionally also track system information.
 3. **Shared location** — a shared folder (or Google Drive, finished on the Sharing page afterwards).
 4. **Hub** — the address of your dashboard and this sim's key, with a connection test. Leave empty if you don't

@@ -20,6 +20,12 @@ def test_onboarding_finds_and_tracks_files(monkeypatch):
     for n in ("Prepar3D.cfg", "dll.xml", "Cameras.cfg", "terrain.cfg"):
         (p3d / n).write_text("[x]\ny=1\n")
     (p3d / "Controls" / "Standard.xml").write_text("<x/>")
+    prosim = tmp / "drive" / "ProSim737" / "ProSimB738"          # ProSim System folder
+    prosim.mkdir(parents=True)
+    for n in ("config.xml", "cockpitsetup.xml", "debug.ini"):
+        (prosim / n).write_text("<x/>")
+    from simconfigmanager.core import system
+    monkeypatch.setattr(system, "prosim_roots", lambda: [str(tmp / "drive")])   # not this PC's real drives
     monkeypatch.setenv("APPDATA", str(app_data))
     monkeypatch.setenv("PROGRAMDATA", str(prog_data))
     monkeypatch.setenv("USERNAME", "Tech")
@@ -33,6 +39,7 @@ def test_onboarding_finds_and_tracks_files(monkeypatch):
 
     assert recommended("P3D v5", "x/Prepar3D.cfg") and not recommended("P3D v5", "x/terrain.cfg")
     assert recommended("ProSim", "c/ProSim737/config.xml") and not recommended("ProSim", "c/a.ini")
+    assert recommended("ProSim", r"C:\prosim\ProSimB738\CockpitSetup.xml")
     repo = Repo(tmp / "data")
     win = MainWindow(repo, start_hidden=True)
     maybe_run_onboarding(win)
@@ -44,13 +51,14 @@ def test_onboarding_finds_and_tracks_files(monkeypatch):
     wiz.autostart.setChecked(False)
     wiz._scan()
     chosen = {os.path.basename(c[2]) for c in wiz.chosen_files()}
-    assert chosen == {"Prepar3D.cfg", "dll.xml", "Cameras.cfg", "Standard.xml"}, chosen   # terrain.cfg unticked
+    assert chosen == {"Prepar3D.cfg", "dll.xml", "Cameras.cfg", "Standard.xml",        # terrain.cfg unticked
+                      "config.xml", "cockpitsetup.xml"}, chosen                         # debug.ini unticked
     wiz.share.setCurrentIndex(1)
     wiz.share_folder.setText(str(tmp / "shared"))
     wiz.accept()
-    assert repo.machine == "Sim 1" and len(repo.files()) == 4
+    assert repo.machine == "Sim 1" and len(repo.files()) == 6
     assert repo.latest_version().number == 1 and repo.get("sync_folder") == str(tmp / "shared")
-    assert all(f.group.startswith("Sim 1 – P3D v5") for f in repo.files())
+    assert {f.group for f in repo.files()} == {"Sim 1 – P3D v5", "Sim 1 – ProSim"}
     assert repo.get("onboarding_done") == "1"
     win._onboarding = None
     maybe_run_onboarding(win)          # not again

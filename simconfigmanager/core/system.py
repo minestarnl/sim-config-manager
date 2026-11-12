@@ -16,6 +16,13 @@ from .assistants import MCP_SERVER_KEY, claude_desktop_config_paths, connect_cla
 
 # --------------------------------------------------------------------------- discovery of sim configs
 
+def prosim_roots() -> list[str]:
+    """Folders searched for a ProSim install (any sub-folder with 'prosim' in its name)."""
+    home = str(Path.home())
+    return ["C:\\", "D:\\", "E:\\", r"C:\Program Files", r"C:\Program Files (x86)",
+            os.path.join(home, "Documents"), os.path.join(home, "Desktop")]
+
+
 def discover_sim_configs() -> list[tuple[str, str, str]]:
     """Suggest well-known P3D / ProSim config files that exist on this PC: [(label, group, path)]."""
     appdata = os.environ.get("APPDATA", "")
@@ -52,9 +59,7 @@ def discover_sim_configs() -> list[tuple[str, str, str]]:
             add(os.path.basename(x), "FSUIPC", x)
 
     # ProSim: install location varies — look in the usual roots, two levels deep.
-    roots = ["C:\\", "D:\\", "E:\\", r"C:\Program Files", r"C:\Program Files (x86)",
-             os.path.join(home, "Documents"), os.path.join(home, "Desktop")]
-    for root in roots:
+    for root in prosim_roots():
         if not os.path.isdir(root):
             continue
         try:
@@ -65,7 +70,9 @@ def discover_sim_configs() -> list[tuple[str, str, str]]:
             if "prosim" not in d.lower():
                 continue
             top = os.path.join(root, d)
-            for pattern in ("config.xml", "*/config.xml", "*/*/config.xml", "*.ini", "*/*.ini"):
+            for pattern in ("config.xml", "*/config.xml", "*/*/config.xml",
+                            "cockpitsetup.xml", "*/cockpitsetup.xml", "*/*/cockpitsetup.xml",   # ProSim System
+                            "*.ini", "*/*.ini"):
                 for x in glob.glob(os.path.join(top, pattern)):
                     rel = os.path.relpath(x, top)
                     add(f"ProSim {rel}", "ProSim", x)
