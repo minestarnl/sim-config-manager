@@ -318,7 +318,8 @@ QToolTip {{ background: {t['sidebar']}; color: {t['fg']}; border: 1px solid {t['
 /* activity bar, page header, status bar */
 #ActivityBar {{ background: {t['activity']}; border-right: 1px solid {t['border']}; }}
 #ActivityBar QToolButton {{ border: none; border-left: 2px solid transparent; background: transparent;
-    padding: 0; margin: 0; }}
+    padding: 0 0 0 10px; margin: 0; text-align: left; color: {t['activity_fg']}; }}
+#ActivityBar QToolButton:checked {{ color: {t['activity_active']}; }}
 #ActivityBar QToolButton:checked {{ border-left: 2px solid {t['primary']}; }}
 #PageHeader {{ background: {t['header']}; border-bottom: 1px solid {t['border']}; }}
 #PageTitle {{ color: {t['fg_strong']}; font-weight: 600; letter-spacing: 0.4px; }}

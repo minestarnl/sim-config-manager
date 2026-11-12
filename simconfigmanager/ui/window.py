@@ -267,7 +267,7 @@ class MainWindow(*PAGE_ORDER, SimServices, QMainWindow):
         h.setSpacing(0)
         bar = QWidget()
         bar.setObjectName("ActivityBar")
-        bar.setFixedWidth(48)
+        self.activity_bar = bar
         bl = QVBoxLayout(bar)
         bl.setContentsMargins(0, 4, 0, 4)
         bl.setSpacing(0)
@@ -279,7 +279,6 @@ class MainWindow(*PAGE_ORDER, SimServices, QMainWindow):
             spec = cls.PAGE
             b = QToolButton()
             b.setCheckable(True)
-            b.setFixedSize(48, 44)
             b.setIconSize(QSize(24, 24))
             b.setToolTip(spec.title)
             b.setCursor(Qt.PointingHandCursor)
@@ -316,6 +315,7 @@ class MainWindow(*PAGE_ORDER, SimServices, QMainWindow):
         h.addWidget(right, 1)
         self.setCentralWidget(central)
 
+            b.setText(spec.title.replace("&", "&&"))      # "&" would otherwise become a shortcut underline
         sb = self.statusBar()
         sb.setSizeGripEnabled(False)
         sb.setProperty("remote", self.remote)
@@ -324,6 +324,7 @@ class MainWindow(*PAGE_ORDER, SimServices, QMainWindow):
         self.sb_net = QLabel()
         self.sb_app = QLabel(f"{APP_TITLE} {APP_VERSION}")
         for w in (self.sb_host, self.sb_version, self.sb_net, self.sb_app):
+        self.apply_nav_labels()
             sb.addPermanentWidget(w)
         self.tabs.currentChanged.connect(lambda _i: self.sync_activity())
         self.sync_activity()
@@ -363,6 +364,15 @@ class MainWindow(*PAGE_ORDER, SimServices, QMainWindow):
             self.sb_host.setText(f"{self._glyph('fleet')} {html.escape(self.repo.machine)}")
         if version_text:
             self.sb_version.setText(version_text)
+    def apply_nav_labels(self) -> None:
+        """Left bar: icon + page name (default) or icons only (Settings → Show page names in the sidebar)."""
+        show = self.pref("nav_labels") != "0"
+        w = 190 if show else 48
+        self.activity_bar.setFixedWidth(w)
+        for b in self.activity.values():
+            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon if show else Qt.ToolButtonIconOnly)
+            b.setFixedSize(w, 40 if show else 44)
+
         srv = getattr(self, "net_server", None)
         if self.remote:
             self.sb_net.setText(f"{self._glyph('plug')} {html.escape(self.repo.base.split('//')[-1])}")

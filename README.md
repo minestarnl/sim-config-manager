@@ -134,7 +134,7 @@ restore point…**). Everything from the setup can be changed later on its own p
 | **Claude / ChatGPT**: read configs, history, sessions and other sims; propose changes you approve | AI & network |
 | Claude from mechanics' MacBooks, ChatGPT through an engineer's Mac, each with a personal access key | AI & network → Network access |
 | **Remote app**: run the app on another PC or a Mac and work on a sim over the LAN as if sitting at it | AI & network, *connect to a sim* |
-| Installer, in-app updates, theme | Settings |
+| Installer, in-app updates, theme, page names in the sidebar | Settings |
 | Runs in the tray, starts with Windows, single instance | Settings |
 
 ### Alert rule types
