@@ -5,7 +5,10 @@ from __future__ import annotations
 import html
 import threading
 import json
+import os
 import sys
+import time
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, QSize
@@ -160,17 +163,49 @@ class MainWindow(*PAGE_ORDER, SimServices, QMainWindow):
     def quit_app(self):
         for e in list(getattr(self, "editors", [])):
             if e.isVisible() and not e.close():
-                return
+                return          # the person chose to keep editing
+        trace = self._quit_trace()
+        # Failsafe: whatever hangs below (an upload, the network server, a stuck check), the process ends.
+        watchdog = threading.Timer(15 if self.sync_dirty else 5, lambda: (trace("watchdog: forced exit"),
+                                                                         os._exit(0)))
+        watchdog.daemon = True
+        watchdog.start()
+        trace("quit requested")
         if self.sync_dirty and not self.remote:
             try:  # last upload before quitting (synchronous)
                 s = self.sync()
                 if s is not None:
                     s.push()
-            except Exception:  # noqa: BLE001
-                pass
-        self.stop_network()
-        self.tray.hide()
+                trace("shared location updated")
+            except Exception as e:  # noqa: BLE001
+                trace(f"upload failed: {e}")
+        for step, fn in (("network stopped", self.stop_network), ("background work dropped", self._drop_bg_work),
+                         ("tray icon removed", self.tray.hide)):
+            try:        # one failing step must never stop the app from quitting
+                fn()
+                trace(step)
+            except Exception as e:  # noqa: BLE001
+                trace(f"{step} — failed: {e}")
         QApplication.quit()
+        trace("event loop told to stop")
+
+    def _drop_bg_work(self):
+        for pool in getattr(self, "_bg_pools", {}).values():   # drop queued background work, don't wait for it
+            pool.shutdown(wait=False, cancel_futures=True)
+
+    def _quit_trace(self):
+        """Steps of quitting, written to quit.log in the data folder (shows where it hangs, if it ever does)."""
+        path = None if self.remote else Path(self.repo.data_dir) / "quit.log"
+
+        def trace(msg: str):
+            if path is None:
+                return
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} pid {os.getpid()}: {msg}\n")
+            except OSError:
+                pass
+        return trace
 
     def notify(self, text: str, title: str = "", warning: bool = False, ms: int = 6000) -> None:
         """One way to report a result: status bar always, tray balloon when the window is hidden or it's a warning."""
@@ -280,6 +315,7 @@ class MainWindow(*PAGE_ORDER, SimServices, QMainWindow):
             b = QToolButton()
             b.setCheckable(True)
             b.setIconSize(QSize(24, 24))
+            b.setText(spec.title.replace("&", "&&"))      # "&" would otherwise become a shortcut underline
             b.setToolTip(spec.title)
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda _c=False, i=idx: self.tabs.setCurrentIndex(i))
@@ -288,6 +324,7 @@ class MainWindow(*PAGE_ORDER, SimServices, QMainWindow):
             if spec.key == "settings":
                 bl.addStretch(1)
             bl.addWidget(b)
+        self.apply_nav_labels()
         h.addWidget(bar)
         right = QWidget()
         v = QVBoxLayout(right)
@@ -315,7 +352,6 @@ class MainWindow(*PAGE_ORDER, SimServices, QMainWindow):
         h.addWidget(right, 1)
         self.setCentralWidget(central)
 
-            b.setText(spec.title.replace("&", "&&"))      # "&" would otherwise become a shortcut underline
         sb = self.statusBar()
         sb.setSizeGripEnabled(False)
         sb.setProperty("remote", self.remote)
@@ -324,10 +360,18 @@ class MainWindow(*PAGE_ORDER, SimServices, QMainWindow):
         self.sb_net = QLabel()
         self.sb_app = QLabel(f"{APP_TITLE} {APP_VERSION}")
         for w in (self.sb_host, self.sb_version, self.sb_net, self.sb_app):
-        self.apply_nav_labels()
             sb.addPermanentWidget(w)
         self.tabs.currentChanged.connect(lambda _i: self.sync_activity())
         self.sync_activity()
+
+    def apply_nav_labels(self) -> None:
+        """Left bar: icon + page name (default) or icons only (Settings → Show page names in the sidebar)."""
+        show = self.pref("nav_labels") != "0"
+        w = 190 if show else 48
+        self.activity_bar.setFixedWidth(w)
+        for b in self.activity.values():
+            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon if show else Qt.ToolButtonIconOnly)
+            b.setFixedSize(w, 40 if show else 44)
 
     @staticmethod
     def _glyph(name: str) -> str:
@@ -364,15 +408,6 @@ class MainWindow(*PAGE_ORDER, SimServices, QMainWindow):
             self.sb_host.setText(f"{self._glyph('fleet')} {html.escape(self.repo.machine)}")
         if version_text:
             self.sb_version.setText(version_text)
-    def apply_nav_labels(self) -> None:
-        """Left bar: icon + page name (default) or icons only (Settings → Show page names in the sidebar)."""
-        show = self.pref("nav_labels") != "0"
-        w = 190 if show else 48
-        self.activity_bar.setFixedWidth(w)
-        for b in self.activity.values():
-            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon if show else Qt.ToolButtonIconOnly)
-            b.setFixedSize(w, 40 if show else 44)
-
         srv = getattr(self, "net_server", None)
         if self.remote:
             self.sb_net.setText(f"{self._glyph('plug')} {html.escape(self.repo.base.split('//')[-1])}")

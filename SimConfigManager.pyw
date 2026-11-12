@@ -1,5 +1,6 @@
 """Start SimConfigManager.  Usage:  SimConfigManager.pyw [--minimized] [--data DIR] [--no-elevate]"""
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -103,7 +104,22 @@ def main():
     if sys.platform == "win32" and not core.is_admin():
         win.statusBar().showMessage("Not running as administrator — restoring files in Program Files / "
                                     "ProgramData may fail.")
-    return app.exec()
+    rc = app.exec()
+    lock.unlock()
+    hard_exit(app, win, rc)
+
+
+def hard_exit(app, win, rc: int):
+    """Quit means quit: a background job that is still busy (a hung PowerShell, health or hardware check) must not
+    keep an invisible process alive. Shut Qt down first (skipping that crashes on exit), then end the process without
+    waiting for worker threads. Everything in the store is already committed; SQLite rolls back the rest."""
+    try:
+        win.deleteLater()
+        app.processEvents()
+        del win
+        app.shutdown()
+    finally:
+        os._exit(rc)
 
 
 def run_remote() -> int:
@@ -119,7 +135,7 @@ def run_remote() -> int:
     if win is None:
         return 0
     win.show_window()
-    return app.exec()
+    hard_exit(app, win, app.exec())   # same as above: don't let a busy background job keep the process alive
 
 
 if __name__ == "__main__":
